@@ -1,17 +1,16 @@
 import random
 import os
-import copy
+from datetime import datetime
 
 # ====================================
-# CSR definition (có thể load từ YAML)
+# CSR definition (ví dụ)
 # ====================================
-# Ví dụ đơn giản 32-bit
 xlen = 32
 csr_map = {
     'mstatus': {
         'address': 0x300,
         'value': 0,
-        'write_fields': [],  # sẽ fill sau
+        'write_fields': [],
         'read_mask': 0xFFFFFFFF
     },
     'mie': {
@@ -22,7 +21,7 @@ csr_map = {
     }
 }
 
-# đơn giản: field toàn bộ CSR, không read-only
+# tất cả CSR có field write toàn bộ CSR
 for csr in csr_map.values():
     csr['write_fields'].append({
         'mask': 0xFFFFFFFF,
@@ -81,10 +80,13 @@ def get_rs1_val(iteration, xlen):
 # Generate assembly
 # ====================================
 
-def gen_csr_test_file(filename, csr_map, xlen=32):
+def gen_csr_test_file(output_dir, csr_map, xlen=32):
     csr_ops = ['csrrw', 'csrrs', 'csrrc', 'csrrwi', 'csrrsi', 'csrrci']
     regs = ['x1','x2','x3','x4','x5','x6','x7','x8','x9','x10']
-    
+
+    filename = os.path.join(output_dir, "asm_test.S")
+    os.makedirs(output_dir, exist_ok=True)
+
     with open(filename, 'w') as f:
         f.write(".section .text\n")
         f.write(".globl _start\n")
@@ -94,41 +96,38 @@ def gen_csr_test_file(filename, csr_map, xlen=32):
             addr = csr['address']
             f.write(f"\n\t# CSR {csr_name}\n")
             for op in csr_ops:
-                for i in range(3):  # 3 test RS1 values
+                for i in range(3):
                     rs1_val = get_rs1_val(i, xlen)
                     dest_reg = regs[i % len(regs)]
                     src_reg  = regs[(i+1) % len(regs)]
 
-                    # compute expected value (predict)
                     pred_val = predict_csr_val(op, rs1_val, csr['value'],
                                                csr['write_fields'],
                                                csr['read_mask'])
 
-                    # li source
                     f.write(f"\tli {src_reg}, 0x{rs1_val:X}\n")
-
-                    # CSR instruction
-                    if op[-1] == 'i':  # immediate
+                    if op[-1] == 'i':
                         imm5 = rs1_val & 0x1F
                         f.write(f"\t{op} {dest_reg}, {addr}, {imm5}\n")
                     else:
                         f.write(f"\t{op} {dest_reg}, {addr}, {src_reg}\n")
 
-                    # predicted check
                     f.write(f"\tli {src_reg}, 0x{pred_val:X}\n")
                     f.write(f"\tbne {src_reg}, {dest_reg}, csr_fail\n")
 
-        # success/fail labels
         f.write("\ncsr_pass:\n")
         f.write("\tj csr_pass\n")
         f.write("csr_fail:\n")
         f.write("\tj csr_fail\n")
+
+    print(f"✓ CSR test file generated at {filename}")
+
 
 # ====================================
 # Run generator
 # ====================================
 
 if __name__ == "__main__":
-    os.makedirs("out", exist_ok=True)
-    gen_csr_test_file("out/riscv_csr_test.S", csr_map)
-    print("✓ CSR test file generated at out/riscv_csr_test.S")
+    today = datetime.now()
+    folder_name = f"out_{today.year}--{today.month:02d}-{today.day:02d}"
+    gen_csr_test_file(folder_name, csr_map)
