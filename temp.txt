@@ -35,53 +35,38 @@ for csr in csr_map.values():
 # Helper functions
 # ====================================
 
-# --- Correct CSR write ---
 def csr_write(val, csr_val, write_fields):
     for f in write_fields:
         if not f['read_only']:
             start, end = f['pos']
             width = end - start + 1
             field_mask = ((1 << width) - 1) << start
-
             csr_val = (csr_val & ~field_mask) | ((val << start) & field_mask)
-
     return csr_val
 
-
-# --- CSR read ---
 def csr_read(csr_val, read_mask):
     return csr_val & read_mask
 
-
-# --- CORRECT PREDICTOR ---
 def predict_csr_val(op, rs1_val, csr_val, write_fields, read_mask):
     old_csr = csr_read(csr_val, read_mask)   # value returned in rd
 
     if op == "csrrw":
         csr_val = csr_write(rs1_val, csr_val, write_fields)
-
     elif op == "csrrs":
         csr_val = csr_write(old_csr | rs1_val, csr_val, write_fields)
-
     elif op == "csrrc":
         csr_val = csr_write(old_csr & (~rs1_val), csr_val, write_fields)
-
     elif op == "csrrwi":
         imm = rs1_val & 0x1F
         csr_val = csr_write(imm, csr_val, write_fields)
-
     elif op == "csrrsi":
         imm = rs1_val & 0x1F
         csr_val = csr_write(old_csr | imm, csr_val, write_fields)
-
     elif op == "csrrci":
         imm = rs1_val & 0x1F
         csr_val = csr_write(old_csr & (~imm), csr_val, write_fields)
+    return old_csr, csr_val
 
-    return old_csr, csr_val      # MUST return both old and updated CSR
-
-
-# --- RS1 random values ---
 def get_rs1_val(iteration, xlen):
     if iteration == 0:
         return int("A5" * (xlen // 8), 16)
@@ -114,30 +99,38 @@ def gen_csr_test_file(output_dir, csr_map, xlen=32):
             addr = csr['address']
             f.write(f"\n\t# ---- CSR {csr_name} ----\n")
 
+            # Step 0: Write a known value to CSR first
+            known_val = 0xA5A50000
+            f.write(f"\tli x1, 0x{known_val:X}\n")
+            f.write(f"\tcsrrw x0, {addr}, x1\n")  # write known value
+            csr['value'] = csr_write(known_val, csr['value'], csr['write_fields'])
+
             for op in csr_ops:
                 for i in range(3):
                     rs1_val = get_rs1_val(i, xlen)
                     dest = regs[i % len(regs)]
                     src  = regs[(i+1) % len(regs)]
 
-                    # Predict old CSR & update value
+                    # Step 1: read old CSR into temp
+                    f.write(f"\tcsrr {src}, {addr}\n")  # temp_old in src
+
+                    # Step 2: execute CSR instruction
+                    if op.endswith("i"):
+                        imm5 = rs1_val & 0x1F
+                        f.write(f"\t{op} {dest}, {addr}, {imm5}\n")
+                    else:
+                        f.write(f"\tli {regs[(i+2) % len(regs)]}, 0x{rs1_val:X}\n")
+                        f.write(f"\t{op} {dest}, {addr}, {regs[(i+2) % len(regs)]}\n")
+
+                    # Step 3: check rd (dest) vs old value (temp_old)
+                    f.write(f"\tbne {src}, {dest}, csr_fail\n")
+
+                    # Step 4: update python-side CSR
                     old_val, new_val = predict_csr_val(
                         op, rs1_val, csr['value'],
                         csr['write_fields'], csr['read_mask']
                     )
-                    csr['value'] = new_val  # update real state
-
-                    # ---- assembly ----
-                    if op.endswith("i"):
-                        imm5 = rs1_val & 0x1F
-                        f.write(f"\tli {src}, 0x{old_val:X}\n")
-                        f.write(f"\t{op} {dest}, {addr}, {imm5}\n")
-                    else:
-                        f.write(f"\tli {src}, 0x{rs1_val:X}\n")
-                        f.write(f"\t{op} {dest}, {addr}, {src}\n")
-                        f.write(f"\tli {src}, 0x{old_val:X}\n")
-
-                    f.write(f"\tbne {src}, {dest}, csr_fail\n")
+                    csr['value'] = new_val
 
         f.write("\ncsr_pass:\n\tj csr_pass\n")
         f.write("csr_fail:\n\tj csr_fail\n")
