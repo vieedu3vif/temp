@@ -103,7 +103,7 @@ def gen_csr_test_file(output_dir, csr_map, xlen=32):
     regs = ['x1','x2','x3','x4','x5','x6','x7','x8','x9','x10']
 
     os.makedirs(output_dir, exist_ok=True)
-    filename = os.path.join(output_dir, "asm_test.S")
+    filename = os.path.join(output_dir, "riscv_csr_test.S")
 
     with open(filename, 'w') as f:
         f.write(".section .text\n")
@@ -151,5 +151,5 @@ def gen_csr_test_file(output_dir, csr_map, xlen=32):
 
 if __name__ == "__main__":
     today = datetime.now()
-    folder = f"out_{today.year}--{today.month:02d}-{today.day:02d}"
+    folder = f"out_{today.year}-{today.month:02d}-{today.day:02d}/asm_test"
     gen_csr_test_file(folder, csr_map)
