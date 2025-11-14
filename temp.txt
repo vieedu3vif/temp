@@ -1,136 +1,131 @@
+import sys
+import yaml
+import argparse
 import random
+import copy
 import os
-from datetime import datetime
 
-# ====================================
-# CSR definition
-# ====================================
-xlen = 32
+TEST_RESULT = 1
+TEST_PASS = 0
+TEST_FAIL = 1
 
-csr_map = {
-    'mstatus': {
-        'address': 0x300,
-        'value': 0,
-        'write_fields': [],
-        'read_mask': 0xFFFFFFFF
-    },
-    'mie': {
-        'address': 0x304,
-        'value': 0,
-        'write_fields': [],
-        'read_mask': 0xFFFFFFFF
-    }
-}
+class CSRField:
+    def __init__(self, mask, pos, read_only):
+        self.mask = mask
+        self.pos = pos
+        self.read_only = read_only
 
-# All fields writable
-for csr in csr_map.values():
-    csr['write_fields'].append({
-        'mask': 0xFFFFFFFF,
-        'pos': (0, xlen - 1),
-        'read_only': False
-    })
-
-
-# ====================================
-# Helper functions
-# ====================================
-
-def csr_write(val, csr_val, write_fields):
-    for f in write_fields:
-        if not f['read_only']:
-            start, end = f['pos']
+    def write(self, val, csr_val):
+        if not self.read_only:
+            start, end = self.pos
             width = end - start + 1
             field_mask = ((1 << width) - 1) << start
-            csr_val = (csr_val & ~field_mask) | ((val << start) & field_mask)
-    return csr_val
+            csr_val &= ~field_mask
+            csr_val |= (val << start) & field_mask
+        return csr_val
 
-def csr_read(csr_val, read_mask):
-    return csr_val & read_mask
-
-def predict_csr_val(op, rs1_val, csr_val, write_fields, read_mask):
-    old_csr = csr_read(csr_val, read_mask)   # value returned in rd
-
-    if op == "csrrw":
-        csr_val = csr_write(rs1_val, csr_val, write_fields)
-    elif op == "csrrs":
-        csr_val = csr_write(old_csr | rs1_val, csr_val, write_fields)
-    elif op == "csrrc":
-        csr_val = csr_write(old_csr & (~rs1_val), csr_val, write_fields)
-    elif op == "csrrwi":
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(imm, csr_val, write_fields)
-    elif op == "csrrsi":
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(old_csr | imm, csr_val, write_fields)
-    elif op == "csrrci":
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(old_csr & (~imm), csr_val, write_fields)
-    return old_csr, csr_val
+def get_csr_map(csr_file, xlen):
+    csrs = {}
+    with open(csr_file, 'r') as f:
+        data = yaml.safe_load(f)
+        for csr_dict in data:
+            csr_name = csr_dict['csr']
+            csr_address = csr_dict['address']
+            csr_val = 0
+            csr_write_fields = []
+            csr_read_mask = 0
+            rv_field_list = csr_dict.get(f'rv{xlen}', [])
+            for field in rv_field_list:
+                mask = (1 << (field['msb'] - field['lsb'] + 1)) - 1
+                mask <<= field['lsb']
+                read_only = True if field['type'] == 'R' else False
+                csr_write_fields.append(CSRField(mask, (field['lsb'], field['msb']), read_only))
+                if field['type'] != 'WPRI':
+                    csr_val |= field.get('reset_val', 0) << field['lsb']
+                    csr_read_mask |= mask
+            csrs[csr_name] = [csr_address, csr_val, csr_write_fields, csr_read_mask]
+    return csrs
 
 def get_rs1_val(iteration, xlen):
     if iteration == 0:
-        return int("A5" * (xlen // 8), 16)
+        return int('A5' * (xlen // 8), 16)
     elif iteration == 1:
-        return int("5A" * (xlen // 8), 16)
-    elif iteration == 2:
+        return int('5A' * (xlen // 8), 16)
+    else:
         val = 0
         for i in range(xlen):
-            val |= random.randint(0, 1) << i
+            val |= (random.randint(0,1) << i)
         return val
 
+def csr_write(val, csr_val, csr_write_fields):
+    for f in csr_write_fields:
+        csr_val = f.write(val, csr_val)
+    return csr_val
 
-# ====================================
-# Assembly generator
-# ====================================
+def csr_read(csr_val, csr_read_mask):
+    return csr_val & csr_read_mask
+
+def predict_csr_val(op, rs1_val, csr_val, csr_write_fields, csr_read_mask):
+    old_val = csr_read(csr_val, csr_read_mask)
+    if op == 'csrrw':
+        csr_val = csr_write(rs1_val, csr_val, csr_write_fields)
+    elif op == 'csrrs':
+        csr_val = csr_write(rs1_val | old_val, csr_val, csr_write_fields)
+    elif op == 'csrrc':
+        csr_val = csr_write(old_val & (~rs1_val), csr_val, csr_write_fields)
+    elif op == 'csrrwi':
+        imm = rs1_val & 0x1F
+        csr_val = csr_write(imm, csr_val, csr_write_fields)
+    elif op == 'csrrsi':
+        imm = rs1_val & 0x1F
+        csr_val = csr_write(imm | old_val, csr_val, csr_write_fields)
+    elif op == 'csrrci':
+        imm = rs1_val & 0x1F
+        csr_val = csr_write(old_val & (~imm), csr_val, csr_write_fields)
+    return old_val, csr_val
 
 def gen_csr_test_file(output_dir, csr_map, xlen=32):
-    csr_ops = ['csrrw', 'csrrs', 'csrrc', 'csrrwi', 'csrrsi', 'csrrci']
+    csr_ops = ['csrrw','csrrs','csrrc','csrrwi','csrrsi','csrrci']
     regs = ['x1','x2','x3','x4','x5','x6','x7','x8','x9','x10']
 
     os.makedirs(output_dir, exist_ok=True)
-    filename = os.path.join(output_dir, "riscv_csr_test.S")
+    filename = os.path.join(output_dir, 'riscv_csr_test.S')
 
     with open(filename, 'w') as f:
-        f.write(".section .text\n")
-        f.write(".globl _start\n")
-        f.write("_start:\n")
+        f.write(".section .text\n.globl _start\n_start:\n")
 
         for csr_name, csr in csr_map.items():
-            addr = csr['address']
-            f.write(f"\n\t# ---- CSR {csr_name} ----\n")
+            addr, csr_val, csr_write_fields, csr_read_mask = csr
 
-            # Step 0: Write a known value to CSR first
+            f.write(f"\n\t# ---- CSR {csr_name} ----\n")
+            # Step 0: write known value
             known_val = 0xA5A50000
             f.write(f"\tli x1, 0x{known_val:X}\n")
-            f.write(f"\tcsrrw x0, {addr}, x1\n")  # write known value
-            csr['value'] = csr_write(known_val, csr['value'], csr['write_fields'])
+            f.write(f"\tcsrrw x0, {addr}, x1\n")
+            csr_val = csr_write(known_val, csr_val, csr_write_fields)
 
             for op in csr_ops:
                 for i in range(3):
                     rs1_val = get_rs1_val(i, xlen)
                     dest = regs[i % len(regs)]
                     src  = regs[(i+1) % len(regs)]
+                    temp = regs[(i+2) % len(regs)]
 
-                    # Step 1: read old CSR into temp
-                    f.write(f"\tcsrr {src}, {addr}\n")  # temp_old in src
+                    # read old value
+                    f.write(f"\tcsrr {src}, {addr}\n")
 
-                    # Step 2: execute CSR instruction
-                    if op.endswith("i"):
+                    # perform CSR
+                    if op.endswith('i'):
                         imm5 = rs1_val & 0x1F
                         f.write(f"\t{op} {dest}, {addr}, {imm5}\n")
                     else:
-                        f.write(f"\tli {regs[(i+2) % len(regs)]}, 0x{rs1_val:X}\n")
-                        f.write(f"\t{op} {dest}, {addr}, {regs[(i+2) % len(regs)]}\n")
+                        f.write(f"\tli {temp}, 0x{rs1_val:X}\n")
+                        f.write(f"\t{op} {dest}, {addr}, {temp}\n")
 
-                    # Step 3: check rd (dest) vs old value (temp_old)
-                    f.write(f"\tbne {src}, {dest}, csr_fail\n")
-
-                    # Step 4: update python-side CSR
-                    old_val, new_val = predict_csr_val(
-                        op, rs1_val, csr['value'],
-                        csr['write_fields'], csr['read_mask']
-                    )
-                    csr['value'] = new_val
+                    # check
+                    old_val, csr_val = predict_csr_val(op, rs1_val, csr_val, csr_write_fields, csr_read_mask)
+                    f.write(f"\tli {temp}, 0x{old_val:X}\n")
+                    f.write(f"\tbne {temp}, {dest}, csr_fail\n")
 
         f.write("\tj csr_pass\n")
         f.write("\ncsr_pass:\n\tj csr_pass\n")
@@ -138,12 +133,21 @@ def gen_csr_test_file(output_dir, csr_map, xlen=32):
 
     print(f"✓ CSR test generated at: {filename}")
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csr_file", type=str, default="yaml/csr_template.yaml")
+    parser.add_argument("--xlen", type=int, default=32)
+    parser.add_argument("--out", type=str, default="./")
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
 
-# ====================================
-# RUN
-# ====================================
+    random.seed(args.seed)
+    csr_map = get_csr_map(args.csr_file, args.xlen)
+
+    from datetime import datetime
+    today = datetime.now()
+    folder = os.path.join(args.out, f"out_{today.year}-{today.month:02d}-{today.day:02d}")
+    gen_csr_test_file(folder, csr_map, args.xlen)
 
 if __name__ == "__main__":
-    today = datetime.now()
-    folder = f"out_{today.year}-{today.month:02d}-{today.day:02d}/asm_test"
-    gen_csr_test_file(folder, csr_map)
+    main()
