@@ -132,6 +132,7 @@ def gen_csr_test_file(output_dir, csr_map, xlen=32):
                     )
                     csr['value'] = new_val
 
+        f.write("\tj csr_pass\n")
         f.write("\ncsr_pass:\n\tj csr_pass\n")
         f.write("csr_fail:\n\tj csr_fail\n")
 
