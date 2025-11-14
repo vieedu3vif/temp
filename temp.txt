@@ -1,102 +1,70 @@
 import random
+import os
 import copy
 
-# ================================================
-# Constants
-# ================================================
-TEST_RESULT = 1
-TEST_PASS   = 0
-TEST_FAIL   = 1
+# ====================================
+# CSR definition (có thể load từ YAML)
+# ====================================
+# Ví dụ đơn giản 32-bit
+xlen = 32
+csr_map = {
+    'mstatus': {
+        'address': 0x300,
+        'value': 0,
+        'write_fields': [],  # sẽ fill sau
+        'read_mask': 0xFFFFFFFF
+    },
+    'mie': {
+        'address': 0x304,
+        'value': 0,
+        'write_fields': [],
+        'read_mask': 0xFFFFFFFF
+    }
+}
 
-# ================================================
-# Helper classes for CSR write fields
-# ================================================
+# đơn giản: field toàn bộ CSR, không read-only
+for csr in csr_map.values():
+    csr['write_fields'].append({
+        'mask': 0xFFFFFFFF,
+        'pos': (0, xlen - 1),
+        'read_only': False
+    })
 
-class SimpleWriteCSRField:
-    def __init__(self, mask, pos, read_only):
-        """
-        mask: integer mask of the field (1s in field bits)
-        pos: tuple(start_bit, end_bit)
-        read_only: boolean
-        """
-        self.mask = mask
-        self.pos = pos
-        self.read_only = read_only
+# ====================================
+# Helper functions
+# ====================================
 
-    def write(self, new_field_val, csr_val):
-        if not self.read_only:
-            start, end = self.pos
-            # lấy giá trị field
-            field_width = end - start + 1
-            mask_field = (1 << field_width) - 1
-            field_val = (new_field_val >> start) & mask_field
-            # ghi vào CSR
-            csr_val &= ~(self.mask)  # clear các bit field
-            csr_val |= (field_val << start) & self.mask
-        return csr_val
-
-class LegalizeWriteCSRField(SimpleWriteCSRField):
-    def __init__(self, mask, pos, read_only, legalize_py):
-        super().__init__(mask, pos, read_only)
-        self.legalize_py = legalize_py
-
-    def write(self, new_field_val, csr_val):
-        if not self.read_only:
-            start, end = self.pos
-            field_width = end - start + 1
-            mask_field = (1 << field_width) - 1
-
-            val_new_slice = (new_field_val >> start) & mask_field
-            val_orig_slice = (csr_val >> start) & mask_field
-
-            # đánh giá legalize script
-            legal_globals = {
-                'val_orig': val_orig_slice,
-                'val_in': val_new_slice,
-                'val_out': val_new_slice
-            }
-            exec(self.legalize_py, legal_globals)
-            legal_val = legal_globals['val_out']
-
-            # ghi giá trị
-            csr_val &= ~(self.mask)
-            csr_val |= (legal_val << start) & self.mask
-        return csr_val
-
-# ================================================
-# CSR read/write functions
-# ================================================
-
-def csr_write(val, csr_val, csr_write_fields):
-    for field in csr_write_fields:
-        csr_val = field.write(val, csr_val)
+def csr_write(val, csr_val, write_fields):
+    for f in write_fields:
+        if not f['read_only']:
+            start, end = f['pos']
+            width = end - start + 1
+            mask = ((1 << width) - 1) << start
+            csr_val &= ~mask
+            csr_val |= (val << start) & mask
     return csr_val
 
-def csr_read(csr_val, csr_read_mask):
-    return csr_val & csr_read_mask
+def csr_read(csr_val, read_mask):
+    return csr_val & read_mask
 
-def predict_csr_val(csr_op, rs1_val, csr_val, csr_write_fields, csr_read_mask):
-    pred = csr_read(csr_val, csr_read_mask)
-    if csr_op == 'csrrw':
-        csr_val = csr_write(rs1_val, csr_val, csr_write_fields)
-    elif csr_op == 'csrrs':
-        csr_val = csr_write(rs1_val | pred, csr_val, csr_write_fields)
-    elif csr_op == 'csrrc':
-        csr_val = csr_write((~rs1_val) & pred, csr_val, csr_write_fields)
-    elif csr_op == 'csrrwi':
-        imm_val = rs1_val & 0x1F  # 5-bit immediate
-        csr_val = csr_write(imm_val, csr_val, csr_write_fields)
-    elif csr_op == 'csrrsi':
+def predict_csr_val(op, rs1_val, csr_val, write_fields, read_mask):
+    pred = csr_read(csr_val, read_mask)
+    if op == 'csrrw':
+        csr_val = csr_write(rs1_val, csr_val, write_fields)
+    elif op == 'csrrs':
+        csr_val = csr_write(rs1_val | pred, csr_val, write_fields)
+    elif op == 'csrrc':
+        csr_val = csr_write((~rs1_val) & pred, csr_val, write_fields)
+    elif op == 'csrrwi':
         imm_val = rs1_val & 0x1F
-        csr_val = csr_write(imm_val | pred, csr_val, csr_write_fields)
-    elif csr_op == 'csrrci':
+        csr_val = csr_write(imm_val, csr_val, write_fields)
+    elif op == 'csrrsi':
         imm_val = rs1_val & 0x1F
-        csr_val = csr_write((~imm_val) & pred, csr_val, csr_write_fields)
+        csr_val = csr_write(imm_val | pred, csr_val, write_fields)
+    elif op == 'csrrci':
+        imm_val = rs1_val & 0x1F
+        csr_val = csr_write((~imm_val) & pred, csr_val, write_fields)
     return csr_val
-
-# ================================================
-# Generate RS1 test values
-# ================================================
 
 def get_rs1_val(iteration, xlen):
     if iteration == 0:
@@ -104,8 +72,63 @@ def get_rs1_val(iteration, xlen):
     elif iteration == 1:
         return int('5a' * (xlen // 8), 16)
     elif iteration == 2:
-        # random xlen bits
         val = 0
         for i in range(xlen):
-            val |= (random.randint(0, 1) << i)
+            val |= (random.randint(0,1) << i)
         return val
+
+# ====================================
+# Generate assembly
+# ====================================
+
+def gen_csr_test_file(filename, csr_map, xlen=32):
+    csr_ops = ['csrrw', 'csrrs', 'csrrc', 'csrrwi', 'csrrsi', 'csrrci']
+    regs = ['x1','x2','x3','x4','x5','x6','x7','x8','x9','x10']
+    
+    with open(filename, 'w') as f:
+        f.write(".section .text\n")
+        f.write(".globl _start\n")
+        f.write("_start:\n")
+
+        for csr_name, csr in csr_map.items():
+            addr = csr['address']
+            f.write(f"\n\t# CSR {csr_name}\n")
+            for op in csr_ops:
+                for i in range(3):  # 3 test RS1 values
+                    rs1_val = get_rs1_val(i, xlen)
+                    dest_reg = regs[i % len(regs)]
+                    src_reg  = regs[(i+1) % len(regs)]
+
+                    # compute expected value (predict)
+                    pred_val = predict_csr_val(op, rs1_val, csr['value'],
+                                               csr['write_fields'],
+                                               csr['read_mask'])
+
+                    # li source
+                    f.write(f"\tli {src_reg}, 0x{rs1_val:X}\n")
+
+                    # CSR instruction
+                    if op[-1] == 'i':  # immediate
+                        imm5 = rs1_val & 0x1F
+                        f.write(f"\t{op} {dest_reg}, {addr}, {imm5}\n")
+                    else:
+                        f.write(f"\t{op} {dest_reg}, {addr}, {src_reg}\n")
+
+                    # predicted check
+                    f.write(f"\tli {src_reg}, 0x{pred_val:X}\n")
+                    f.write(f"\tbne {src_reg}, {dest_reg}, csr_fail\n")
+
+        # success/fail labels
+        f.write("\ncsr_pass:\n")
+        f.write("\tj csr_pass\n")
+        f.write("csr_fail:\n")
+        f.write("\tj csr_fail\n")
+
+# ====================================
+# Run generator
+# ====================================
+
+if __name__ == "__main__":
+    os.makedirs("out", exist_ok=True)
+    gen_csr_test_file("out/riscv_csr_test.S", csr_map)
+    print("✓ CSR test file generated at out/riscv_csr_test.S")
