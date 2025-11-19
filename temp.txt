@@ -1,147 +1,140 @@
-# RISC-V CSR template for riscv-dv
-# CSRs: sstatus, stvec, sie, sip, scounteren, stval, satp, sscratch, sepc, senvcfg, scause
-
+# RISC-V S-mode CSR configuration for riscv-dv (based on Privileged Spec 20211203)
+# NOTE: Fill fields exactly per spec. This file is incomplete until sstatus is corrected.
 - csr: sstatus
   description: >
-    Supervisor Status Register
+    Supervisor status register
   address: 0x100
   privilege_mode: S
-  rv32:
-    - field_name: XS
+  rv64:
+    - field_name: SD
       description: >
-        Extensions status (implementation defined)
+        Read-only dirty summary bit. SD = (FS==11) OR (XS==11) OR (VS==11)
+      type: R
+      reset_val: 0
+      msb: 63
+      lsb: 63
+
+    - field_name: WPRI_62_34
+      description: Reserved
       type: WPRI
       reset_val: 0
-      msb: 16
-      lsb: 15
-    - field_name: FS
+      msb: 62
+      lsb: 34
+
+    - field_name: UXL
       description: >
-        Floating-point status
+        Controls XLEN for U-mode.
+        01=32-bit (default), 10=64-bit
+      type: WARL
+      reset_val: 1
+      msb: 33
+      lsb: 32
+
+    - field_name: WPRI_31_20
+      description: Reserved
       type: WPRI
       reset_val: 0
-      msb: 14
-      lsb: 13
-    - field_name: VS
-      description: >
-        Vector/extension save-needed status (if supported)
-      type: WPRI
-      reset_val: 0
-      msb: 11
-      lsb: 10
-    - field_name: SPP
-      description: >
-        Supervisor Previous Privilege (0=U, 1=S)
-      type: WARL
-      reset_val: 0
-      msb: 8
-      lsb: 8
-    - field_name: UBE
-      description: >
-        User-endianness (big-endian if 1)
-      type: WARL
-      reset_val: 0
-      msb: 6
-      lsb: 6
-    - field_name: SPIE
-      description: >
-        Supervisor Previous Interrupt Enable
-      type: WARL
-      reset_val: 0
-      msb: 5
-      lsb: 5
-    - field_name: SIE
-      description: >
-        Supervisor Interrupt Enable
-      type: WARL
-      reset_val: 0
-      msb: 1
-      lsb: 1
-    - field_name: SUM
-      description: >
-        Permit S-mode to access U-mode memory
-      type: WARL
-      reset_val: 0
-      msb: 18
-      lsb: 18
+      msb: 31
+      lsb: 20
+
     - field_name: MXR
-      description: >
-        Make eXecutable Readable
+      description: Modify privilege for load access to virtual memory
       type: WARL
       reset_val: 0
       msb: 19
       lsb: 19
 
-  rv64:
-    - field_name: UXL
-      description: >
-        U-mode XLEN setting (WARL, encodes 32/64 etc.)
-      type: WARL
-      reset_val: 0
-      msb: 33
-      lsb: 32
-    - field_name: XS
-      description: >
-        Extensions status (implementation defined)
-      type: WPRI
-      reset_val: 0
-      msb: 16
-      lsb: 15
-    - field_name: FS
-      description: >
-        Floating-point status
-      type: WPRI
-      reset_val: 0
-      msb: 14
-      lsb: 13
-    - field_name: VS
-      description: >
-        Vector/extension save-needed status (if supported)
-      type: WPRI
-      reset_val: 0
-      msb: 11
-      lsb: 10
-    - field_name: SPP
-      description: >
-        Supervisor Previous Privilege (0=U, 1=S)
-      type: WARL
-      reset_val: 0
-      msb: 8
-      lsb: 8
-    - field_name: UBE
-      description: >
-        User-endianness (big-endian if 1)
-      type: WARL
-      reset_val: 0
-      msb: 6
-      lsb: 6
-    - field_name: SPIE
-      description: >
-        Supervisor Previous Interrupt Enable
-      type: WARL
-      reset_val: 0
-      msb: 5
-      lsb: 5
-    - field_name: SIE
-      description: >
-        Supervisor Interrupt Enable
-      type: WARL
-      reset_val: 0
-      msb: 1
-      lsb: 1
     - field_name: SUM
-      description: >
-        Permit S-mode to access U-mode memory
+      description: Modify privilege for S-mode load/store access to VM
       type: WARL
       reset_val: 0
       msb: 18
       lsb: 18
-    - field_name: MXR
-      description: >
-        Make eXecutable Readable
+
+    - field_name: WPRI_17
+      description: Reserved
+      type: WPRI
+      reset_val: 0
+      msb: 17
+      lsb: 17
+
+    - field_name: XS
+      description: Additional user-mode extension state
+      type: R
+      reset_val: 0
+      msb: 16
+      lsb: 15
+
+    - field_name: FS
+      description: Floating-point unit state
       type: WARL
       reset_val: 0
-      msb: 19
-      lsb: 19
+      msb: 14
+      lsb: 13
+
+    - field_name: WPRI_12_11
+      description: Reserved
+      type: WPRI
+      reset_val: 0
+      msb: 12
+      lsb: 11
+
+    - field_name: VS
+      description: Vector extension state
+      type: WARL
+      reset_val: 0
+      msb: 10
+      lsb: 9
+
+    - field_name: SPP
+      description: Previous privilege mode (0=U, 1=S)
+      type: WARL
+      reset_val: 0
+      msb: 8
+      lsb: 8
+
+    - field_name: WPRI_7
+      description: Reserved
+      type: WPRI
+      reset_val: 0
+      msb: 7
+      lsb: 7
+
+    - field_name: UBE
+      description: Endianness for U-mode (0=little endian)
+      type: WARL
+      reset_val: 0
+      msb: 6
+      lsb: 6
+
+    - field_name: SPIE
+      description: Previous S-mode interrupt-enable
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+
+    - field_name: WPRI_4_3
+      description: Reserved
+      type: WPRI
+      reset_val: 0
+      msb: 4
+      lsb: 3
+
+    - field_name: SIE
+      description: Supervisor interrupt enable
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+
+    - field_name: WPRI_0
+      description: Reserved
+      type: WPRI
+      reset_val: 0
+      msb: 0
+      lsb: 0
+
 
 - csr: stvec
   description: >
