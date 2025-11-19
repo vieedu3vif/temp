@@ -1,153 +1,617 @@
-import sys
-import yaml
-import argparse
-import random
-import copy
-import os
+# RISC-V CSR template for riscv-dv
+# CSRs: sstatus, stvec, sie, sip, scounteren, stval, satp, sscratch, sepc, senvcfg, scause
 
-TEST_RESULT = 1
-TEST_PASS = 0
-TEST_FAIL = 1
+- csr: sstatus
+  description: >
+    Supervisor Status Register
+  address: 0x100
+  privilege_mode: S
+  rv32:
+    - field_name: XS
+      description: >
+        Extensions status (implementation defined)
+      type: WPRI
+      reset_val: 0
+      msb: 16
+      lsb: 15
+    - field_name: FS
+      description: >
+        Floating-point status
+      type: WPRI
+      reset_val: 0
+      msb: 14
+      lsb: 13
+    - field_name: VS
+      description: >
+        Vector/extension save-needed status (if supported)
+      type: WPRI
+      reset_val: 0
+      msb: 11
+      lsb: 10
+    - field_name: SPP
+      description: >
+        Supervisor Previous Privilege (0=U, 1=S)
+      type: WARL
+      reset_val: 0
+      msb: 8
+      lsb: 8
+    - field_name: UBE
+      description: >
+        User-endianness (big-endian if 1)
+      type: WARL
+      reset_val: 0
+      msb: 6
+      lsb: 6
+    - field_name: SPIE
+      description: >
+        Supervisor Previous Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SIE
+      description: >
+        Supervisor Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: SUM
+      description: >
+        Permit S-mode to access U-mode memory
+      type: WARL
+      reset_val: 0
+      msb: 18
+      lsb: 18
+    - field_name: MXR
+      description: >
+        Make eXecutable Readable
+      type: WARL
+      reset_val: 0
+      msb: 19
+      lsb: 19
 
-class CSRField:
-    def __init__(self, mask, pos, read_only):
-        self.mask = mask
-        self.pos = pos
-        self.read_only = read_only
+  rv64:
+    - field_name: UXL
+      description: >
+        U-mode XLEN setting (WARL, encodes 32/64 etc.)
+      type: WARL
+      reset_val: 0
+      msb: 33
+      lsb: 32
+    - field_name: XS
+      description: >
+        Extensions status (implementation defined)
+      type: WPRI
+      reset_val: 0
+      msb: 16
+      lsb: 15
+    - field_name: FS
+      description: >
+        Floating-point status
+      type: WPRI
+      reset_val: 0
+      msb: 14
+      lsb: 13
+    - field_name: VS
+      description: >
+        Vector/extension save-needed status (if supported)
+      type: WPRI
+      reset_val: 0
+      msb: 11
+      lsb: 10
+    - field_name: SPP
+      description: >
+        Supervisor Previous Privilege (0=U, 1=S)
+      type: WARL
+      reset_val: 0
+      msb: 8
+      lsb: 8
+    - field_name: UBE
+      description: >
+        User-endianness (big-endian if 1)
+      type: WARL
+      reset_val: 0
+      msb: 6
+      lsb: 6
+    - field_name: SPIE
+      description: >
+        Supervisor Previous Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SIE
+      description: >
+        Supervisor Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: SUM
+      description: >
+        Permit S-mode to access U-mode memory
+      type: WARL
+      reset_val: 0
+      msb: 18
+      lsb: 18
+    - field_name: MXR
+      description: >
+        Make eXecutable Readable
+      type: WARL
+      reset_val: 0
+      msb: 19
+      lsb: 19
 
-    def write(self, val, csr_val):
-        if not self.read_only:
-            start, end = self.pos
-            width = end - start + 1
-            field_mask = ((1 << width) - 1) << start
-            csr_val &= ~field_mask
-            csr_val |= (val << start) & field_mask
-        return csr_val
+- csr: stvec
+  description: >
+    Supervisor Trap Vector Base Address Register (BASE + MODE)
+  address: 0x105
+  privilege_mode: S
+  rv32:
+    - field_name: BASE
+      description: >
+        Vector base address (stored as BASE[31:2], low bits implied zero)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 2
+    - field_name: MODE
+      description: >
+        Vector mode encoding (0=Direct, 1=Vectored)
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 0
+  rv64:
+    - field_name: BASE
+      description: >
+        Vector base address (stored as BASE[63:2], low bits implied zero)
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 2
+    - field_name: MODE
+      description: >
+        Vector mode encoding (0=Direct, 1=Vectored)
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 0
 
-def get_csr_map(csr_file, xlen):
-    csrs = {}
-    with open(csr_file, 'r') as f:
-        data = yaml.safe_load(f)
-        for csr_dict in data:
-            csr_name = csr_dict['csr']
-            csr_address = csr_dict['address']
-            csr_val = 0
-            csr_write_fields = []
-            csr_read_mask = 0
-            rv_field_list = csr_dict.get(f'rv{xlen}', [])
-            for field in rv_field_list:
-                mask = (1 << (field['msb'] - field['lsb'] + 1)) - 1
-                mask <<= field['lsb']
-                read_only = True if field['type'] == 'R' else False
-                csr_write_fields.append(CSRField(mask, (field['lsb'], field['msb']), read_only))
-                if field['type'] != 'WPRI':
-                    csr_val |= field.get('reset_val', 0) << field['lsb']
-                    csr_read_mask |= mask
-            csrs[csr_name] = [csr_address, csr_val, csr_write_fields, csr_read_mask]
-    return csrs
+- csr: sie
+  description: >
+    Supervisor Interrupt Enable (global per interrupt source bits)
+  address: 0x104
+  privilege_mode: S
+  rv32:
+    - field_name: SEIE
+      description: >
+        Supervisor External Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 9
+      lsb: 9
+    - field_name: STIE
+      description: >
+        Supervisor Timer Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SSIE
+      description: >
+        Supervisor Software Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+  rv64:
+    - field_name: SEIE
+      description: >
+        Supervisor External Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 9
+      lsb: 9
+    - field_name: STIE
+      description: >
+        Supervisor Timer Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SSIE
+      description: >
+        Supervisor Software Interrupt Enable
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
 
-def get_rs1_val(iteration, xlen):
-    if iteration == 0:
-        return int('A5' * (xlen // 8), 16)
-    elif iteration == 1:
-        return int('5A' * (xlen // 8), 16)
-    else:
-        val = 0
-        for i in range(xlen):
-            val |= (random.randint(0,1) << i)
-        return val
+- csr: sip
+  description: >
+    Supervisor Interrupt Pending (pending bits mirror sie)
+  address: 0x144
+  privilege_mode: S
+  rv32:
+    - field_name: SEIP
+      description: >
+        Supervisor External Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 9
+      lsb: 9
+    - field_name: STIP
+      description: >
+        Supervisor Timer Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SSIP
+      description: >
+        Supervisor Software Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+  rv64:
+    - field_name: SEIP
+      description: >
+        Supervisor External Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 9
+      lsb: 9
+    - field_name: STIP
+      description: >
+        Supervisor Timer Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+    - field_name: SSIP
+      description: >
+        Supervisor Software Interrupt Pending
+      type: WLRL
+      reset_val: 0
+      msb: 1
+      lsb: 1
 
-def csr_write(val, csr_val, csr_write_fields):
-    for f in csr_write_fields:
-        csr_val = f.write(val, csr_val)
-    return csr_val
+- csr: scounteren
+  description: >
+    Supervisor Counter-Enable Register (controls U-mode access to counters)
+  address: 0x106
+  privilege_mode: S
+  rv32:
+    - field_name: HPM31
+      description: >
+        HPM31 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 31
+    - field_name: HPM30
+      description: >
+        HPM30 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 30
+      lsb: 30
+    - field_name: HPM29
+      description: >
+        HPM29 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 29
+      lsb: 29
+    # ... HPM bits down to HPM3
+    - field_name: HPM3
+      description: >
+        HPM3 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 3
+      lsb: 3
+    - field_name: IR
+      description: >
+        instret read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 2
+      lsb: 2
+    - field_name: TM
+      description: >
+        time read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: CY
+      description: >
+        cycle read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 0
+      lsb: 0
+  rv64:
+    - field_name: HPM31
+      description: >
+        HPM31 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 31
+    - field_name: HPM30
+      description: >
+        HPM30 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 30
+      lsb: 30
+    - field_name: HPM29
+      description: >
+        HPM29 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 29
+      lsb: 29
+    - field_name: HPM3
+      description: >
+        HPM3 enable for U-mode (if implemented)
+      type: WARL
+      reset_val: 0
+      msb: 3
+      lsb: 3
+    - field_name: IR
+      description: >
+        instret read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 2
+      lsb: 2
+    - field_name: TM
+      description: >
+        time read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: CY
+      description: >
+        cycle read enable for U-mode
+      type: WARL
+      reset_val: 0
+      msb: 0
+      lsb: 0
 
-def csr_read(csr_val, csr_read_mask):
-    return csr_val & csr_read_mask
+- csr: stval
+  description: >
+    Supervisor Trap Value register (holds faulting VA or other info)
+  address: 0x143
+  privilege_mode: S
+  rv32:
+    - field_name: stval
+      description: >
+        Trap-specific information / faulting address (SXLEN bits)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 0
+  rv64:
+    - field_name: stval
+      description: >
+        Trap-specific information / faulting address (SXLEN bits)
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 0
 
-def predict_csr_val(op, rs1_val, csr_val, csr_write_fields, csr_read_mask):
-    old_val = csr_read(csr_val, csr_read_mask)
-    if op == 'csrrw':
-        csr_val = csr_write(rs1_val, csr_val, csr_write_fields)
-    elif op == 'csrrs':
-        csr_val = csr_write(rs1_val | old_val, csr_val, csr_write_fields)
-    elif op == 'csrrc':
-        csr_val = csr_write(old_val & (~rs1_val), csr_val, csr_write_fields)
-    elif op == 'csrrwi':
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(imm, csr_val, csr_write_fields)
-    elif op == 'csrrsi':
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(imm | old_val, csr_val, csr_write_fields)
-    elif op == 'csrrci':
-        imm = rs1_val & 0x1F
-        csr_val = csr_write(old_val & (~imm), csr_val, csr_write_fields)
-    return old_val, csr_val
+- csr: satp
+  description: >
+    Supervisor Address Translation and Protection register (MODE, ASID, PPN)
+  address: 0x180
+  privilege_mode: S
+  rv32:
+    - field_name: MODE
+      description: >
+        Translation mode (0=Bare, 1=Sv32)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 31
+    - field_name: ASID
+      description: >
+        Address Space ID (implementation defined ASIDLEN, up to 9 for Sv32)
+      type: WARL
+      reset_val: 0
+      msb: 30
+      lsb: 22
+    - field_name: PPN
+      description: >
+        Physical Page Number of root page table (PPN)
+      type: WARL
+      reset_val: 0
+      msb: 21
+      lsb: 0
+  rv64:
+    - field_name: MODE
+      description: >
+        Translation mode (0=Bare, 8=Sv39, 9=Sv48, 10=Sv57, ...)
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 60
+    - field_name: ASID
+      description: >
+        Address Space ID (implementation defined ASIDLEN, up to 16 for Sv39/48)
+      type: WARL
+      reset_val: 0
+      msb: 59
+      lsb: 44
+    - field_name: PPN
+      description: >
+        Physical Page Number of root page table (PPN)
+      type: WARL
+      reset_val: 0
+      msb: 43
+      lsb: 0
 
-def gen_csr_test_file(output_dir, csr_map, xlen=32):
-    csr_ops = ['csrrw','csrrs','csrrc','csrrwi','csrrsi','csrrci']
-    regs = ['x1','x2','x3','x4','x5','x6','x7','x8','x9','x10']
+- csr: sscratch
+  description: >
+    Supervisor Scratch register (hart-local scratch for trap handlers)
+  address: 0x140
+  privilege_mode: S
+  rv32:
+    - field_name: sscratch
+      description: >
+        Scratch value for supervisor (full SXLEN)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 0
+  rv64:
+    - field_name: sscratch
+      description: >
+        Scratch value for supervisor (full SXLEN)
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 0
 
-    os.makedirs(output_dir, exist_ok=True)
-    filename = os.path.join(output_dir, 'riscv_csr_test.S')
+- csr: sepc
+  description: >
+    Supervisor Exception Program Counter (holds return PC on trap)
+  address: 0x141
+  privilege_mode: S
+  rv32:
+    - field_name: sepc
+      description: >
+        Exception PC (low bit(s) masked according to IALIGN)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 0
+  rv64:
+    - field_name: sepc
+      description: >
+        Exception PC (low bit(s) masked according to IALIGN)
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 0
 
-    with open(filename, 'w') as f:
-        f.write(".section .text\n.globl _start\n_start:\n")
+- csr: senvcfg
+  description: >
+    Supervisor Environment Configuration (controls certain U-mode behavior)
+  address: 0x10A
+  privilege_mode: S
+  rv32:
+    - field_name: FIOM
+      description: >
+        Fence-of-I/O implies Memory in U-mode when set
+      type: WARL
+      reset_val: 0
+      msb: 0
+      lsb: 0
+    - field_name: CBZE
+      description: >
+        Cache block zero extension (defined by Zicboz) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: CBCFE
+      description: >
+        Cache block cache flush extension (Zicbom related) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 2
+      lsb: 2
+    - field_name: CBIE
+      description: >
+        Cache block invalidate extension (Zicbom related) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 3
+      lsb: 3
+    - field_name: RESERVED
+      description: >
+        Reserved / other extension-defined bits
+      type: WPRI
+      reset_val: 0
+      msb: 31
+      lsb: 4
+  rv64:
+    - field_name: FIOM
+      description: >
+        Fence-of-I/O implies Memory in U-mode when set
+      type: WARL
+      reset_val: 0
+      msb: 0
+      lsb: 0
+    - field_name: CBZE
+      description: >
+        Cache block zero extension (defined by Zicboz) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 1
+      lsb: 1
+    - field_name: CBCFE
+      description: >
+        Cache block cache flush extension (Zicbom related) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 2
+      lsb: 2
+    - field_name: CBIE
+      description: >
+        Cache block invalidate extension (Zicbom related) - placeholder
+      type: WPRI
+      reset_val: 0
+      msb: 3
+      lsb: 3
+    - field_name: RESERVED
+      description: >
+        Reserved / other extension-defined bits
+      type: WPRI
+      reset_val: 0
+      msb: 63
+      lsb: 4
 
-        for csr_name, csr in csr_map.items():
-            addr, csr_val, csr_write_fields, csr_read_mask = csr
-
-            f.write(f"\n\t# ---- CSR {csr_name} ----\n")
-            # Step 0: write known value
-            known_val = 0xA5A50000
-            f.write(f"\tli x1, 0x{known_val:X}\n")
-            f.write(f"\tcsrrw x0, {addr}, x1\n")
-            csr_val = csr_write(known_val, csr_val, csr_write_fields)
-
-            for op in csr_ops:
-                for i in range(3):
-                    rs1_val = get_rs1_val(i, xlen)
-                    dest = regs[i % len(regs)]
-                    src  = regs[(i+1) % len(regs)]
-                    temp = regs[(i+2) % len(regs)]
-
-                    # read old value
-                    f.write(f"\tcsrr {src}, {addr}\n")
-
-                    # perform CSR
-                    if op.endswith('i'):
-                        imm5 = rs1_val & 0x1F
-                        f.write(f"\t{op} {dest}, {addr}, {imm5}\n")
-                    else:
-                        f.write(f"\tli {temp}, 0x{rs1_val:X}\n")
-                        f.write(f"\t{op} {dest}, {addr}, {temp}\n")
-
-                    # check
-                    old_val, csr_val = predict_csr_val(op, rs1_val, csr_val, csr_write_fields, csr_read_mask)
-                    f.write(f"\tli {temp}, 0x{old_val:X}\n")
-                    f.write(f"\tbne {temp}, {dest}, csr_fail\n")
-
-        f.write("\tj csr_pass\n")
-        f.write("\ncsr_pass:\n\tj csr_pass\n")
-        f.write("csr_fail:\n\tj csr_fail\n")
-
-    print(f"✓ CSR test generated at: {filename}")
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csr_file", type=str, default="yaml/csr_template.yaml")
-    parser.add_argument("--xlen", type=int, default=32)
-    parser.add_argument("--out", type=str, default="./")
-    parser.add_argument("--seed", type=int, default=None)
-    args = parser.parse_args()
-
-    random.seed(args.seed)
-    csr_map = get_csr_map(args.csr_file, args.xlen)
-
-    from datetime import datetime
-    today = datetime.now()
-    folder = os.path.join(args.out, f"out_{today.year}-{today.month:02d}-{today.day:02d}")
-    gen_csr_test_file(folder, csr_map, args.xlen)
-
-if __name__ == "__main__":
-    main()
+- csr: scause
+  description: >
+    Supervisor Cause register (Interrupt bit + Exception code)
+  address: 0x142
+  privilege_mode: S
+  rv32:
+    - field_name: Interrupt
+      description: >
+        Interrupt indicator (1=interrupt, 0=exception)
+      type: WLRL
+      reset_val: 0
+      msb: 31
+      lsb: 31
+    - field_name: ExceptionCode
+      description: >
+        Exception/interrupt code (WLRL, must implement bits 4:0)
+      type: WLRL
+      reset_val: 0
+      msb: 30
+      lsb: 0
+  rv64:
+    - field_name: Interrupt
+      description: >
+        Interrupt indicator (1=interrupt, 0=exception)
+      type: WLRL
+      reset_val: 0
+      msb: 63
+      lsb: 63
+    - field_name: ExceptionCode
+      description: >
+        Exception/interrupt code (WLRL, must implement bits 4:0)
+      type: WLRL
+      reset_val: 0
+      msb: 62
+      lsb: 0
