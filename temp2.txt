@@ -1,280 +1,288 @@
-- csr: vsstatus
-  description: >
-    Virtual Supervisor Status Register
-  address: 0x200
-  privilege_mode: S
-  rv32:
-    - field_name: SD
-      description: >
-        Summary dirty bit. Read-only. Indicates FS/VS/XS are dirty.
-      type: R
-      reset_val: 0
-      msb: 31
-      lsb: 31
+- csr: hstatus  
+  description: >  
+    Hypervisor status register. Kiểm soát trạng thái virtualization ở HS-mode.  
+  address: 0x600  
+  privilege_mode: H  
+  rv32:  
+    - field_name: SPV  
+      description: >  
+        Previous virtualisation mode (Saved V bit)  
+      type: WARL  
+      reset_val: 0  
+      msb: 0  
+      lsb: 0  
+    - field_name: VIEN  
+      description: >  
+        Virtual Interrupt Enable (for VS-mode)  
+      type: WARL  
+      reset_val: 0  
+      msb: 1  
+      lsb: 1  
+    # ... (còn các bit khác như SPVP, WPRI hoặc reserved)  
+  rv64:  
+    - field_name: SPV  
+      description: >  
+        Previous virtualization mode  
+      type: WARL  
+      reset_val: 0  
+      msb: 0  
+      lsb: 0  
+    - field_name: VIEN  
+      description: >  
+        Virtual interrupt enable  
+      type: WARL  
+      reset_val: 0  
+      msb: 1  
+      lsb: 1  
+    # ... các field khác tùy spec  
 
-    - field_name: WPRI_30_19
-      description: >
-        Reserved, read as zero.
-      type: WPRI
-      reset_val: 0
-      msb: 30
-      lsb: 19
+- csr: hedeleg  
+  description: >  
+    Hypervisor exception delegation register. Dùng để ủy quyền exception từ HS-mode xuống VS-mode nếu V = 1.  
+  address: 0x602  
+  privilege_mode: H  
+  rv32:  
+    - field_name: EXCEPT_DELEG  
+      description: >  
+        Bits đại diện các loại exception có thể ủy quyền.  
+      type: WARL  
+      reset_val: 0  
+      msb: 31  
+      lsb: 0  
+  rv64:  
+    - field_name: EXCEPT_DELEG  
+      description: >  
+        Exception delegation bits.  
+      type: WARL  
+      reset_val: 0  
+      msb: 63  
+      lsb: 0  
 
-    - field_name: MXR
-      description: >
-        Make eXecutable readable.
-      type: WARL
-      reset_val: 0
-      msb: 18
-      lsb: 18
+- csr: hideleg  
+  description: >  
+    Hypervisor interrupt delegation register. Dùng để ủy quyền interrupt từ HS → VS nếu bit tương ứng = 1.  
+  address: 0x603  
+  privilege_mode: H  
+  rv32:  
+    - field_name: INT_DELEG  
+      description: >  
+        Các bit interrupt VS-level có thể được ủy quyền.  
+      type: WARL  
+      reset_val: 0  
+      msb: 31  
+      lsb: 0  
+  rv64:  
+    - field_name: INT_DELEG  
+      description: >  
+        Interrupt delegation bits.  
+      type: WARL  
+      reset_val: 0  
+      msb: 63  
+      lsb: 0  
 
-    - field_name: SUM
-      description: >
-        Permit VS-mode to access user memory.
-      type: WARL
-      reset_val: 0
-      msb: 17
-      lsb: 17
+- csr: hie  
+  description: >  
+    Hypervisor interrupt-enable register. Chứa các bit cho phép interrupt VS‑level / hypervisor‑specific.  
+  address: 0x604  
+  privilege_mode: H  
+  rv32:  
+    - field_name: VSEIE  
+      description: >  
+        Enable VS-level external interrupt.  
+      type: WARL  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIE  
+      description: >  
+        Enable VS-level timer interrupt.  
+      type: WARL  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIE  
+      description: >  
+        Enable VS-level software interrupt.  
+      type: WARL  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
+    # … và các bit khác tùy spec  
+  rv64:  
+    - field_name: VSEIE  
+      description: >  
+        VS external interrupt enable  
+      type: WARL  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIE  
+      description: >  
+        VS timer interrupt enable  
+      type: WARL  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIE  
+      description: >  
+        VS software interrupt enable  
+      type: WARL  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
 
-    - field_name: VS
-      description: >
-        Vector extension status field.
-      type: WARL
-      reset_val: 0
-      msb: 16
-      lsb: 15
+- csr: hip  
+  description: >  
+    Hypervisor interrupt-pending register. Chỉ ra các interrupt VS-level / hypervisor đang chờ.  
+  address: 0x644  
+  privilege_mode: H  
+  rv32:  
+    - field_name: VSEIP  
+      description: >  
+        VS external interrupt pending.  
+      type: WPRI  # hoặc WARL tùy spec  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIP  
+      description: >  
+        VS timer interrupt pending.  
+      type: WPRI  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIP  
+      description: >  
+        VS software interrupt pending.  
+      type: WPRI  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
+    # … các bit khác  
+  rv64:  
+    - field_name: VSEIP  
+      description: >  
+        VS external interrupt pending.  
+      type: WPRI  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIP  
+      description: >  
+        VS timer interrupt pending.  
+      type: WPRI  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIP  
+      description: >  
+        VS software interrupt pending.  
+      type: WPRI  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
 
-    - field_name: FS
-      description: >
-        Floating-point unit status.
-      type: WARL
-      reset_val: 0
-      msb: 14
-      lsb: 13
+- csr: hvip  
+  description: >  
+    Hypervisor virtual-interrupt-pending register. Hypervisor dùng để “inject” interrupt ảo vào VS-mode.  
+  address: 0x645  
+  privilege_mode: H  
+  rv32:  
+    - field_name: VSEIP  
+      description: >  
+        VS external interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIP  
+      description: >  
+        VS timer interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIP  
+      description: >  
+        VS software interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
+    # …  
+  rv64:  
+    - field_name: VSEIP  
+      description: >  
+        VS external interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 10  
+      lsb: 10  
+    - field_name: VSTIP  
+      description: >  
+        VS timer interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 6  
+      lsb: 6  
+    - field_name: VSSIP  
+      description: >  
+        VS software interrupt inject.  
+      type: WARL  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
 
-    - field_name: XS
-      description: >
-        Extension status.
-      type: WARL
-      reset_val: 0
-      msb: 12
-      lsb: 11
+- csr: hcounteren  
+  description: >  
+    Hypervisor counter‑enable register. Quyền truy cập các bộ đếm (counters) trong VS-mode.  
+  address: 0x606  
+  privilege_mode: H  
+  rv32:  
+    - field_name: CYCLEEN  
+      description: >  
+        Cho phép VS-mode đọc bộ đếm cycle.  
+      type: WARL  
+      reset_val: 0  
+      msb: 0  
+      lsb: 0  
+    - field_name: TIMEEN  
+      description: >  
+        Cho phép VS-mode đọc time (timer) counter.  
+      type: WARL  
+      reset_val: 0  
+      msb: 1  
+      lsb: 1  
+    - field_name: INSTRETEN  
+      description: >  
+        Cho phép VS-mode đọc bộ đếm số lệnh (instruction retired).  
+      type: WARL  
+      reset_val: 0  
+      msb: 2  
+      lsb: 2  
+    # … các counter khác tùy spec  
+  rv64:  
+    tương tự như rv32 (các bit enable bộ đếm)  
 
-    - field_name: UXL
-      description: >
-        User-mode effective XLEN.
-      type: R
-      reset_val: 0
-      msb: 9
-      lsb: 8
+- csr: htval  
+  description: >  
+    Hypervisor trap value register: lưu giá trị tval (giá trị lỗi) cho trap HS → VS hoặc VS → HS.  
+  address: 0x643  
+  privilege_mode: H  
+  rv32:  
+    - field_name: HTVAL  
+      description: >  
+        Lưu giá trị exception / trap fault cho hypervisor.  
+      type: WARL  
+      reset_val: 0  
+      msb: 31  
+      lsb: 0  
+  rv64:  
+    - field_name: HTVAL  
+      description: >  
+        Hypervisor tval (trap value).  
+      type: WARL  
+      reset_val: 0  
+      msb: 63  
+      lsb: 0  
 
-    - field_name: WPRI_7_6
-      description: >
-        Reserved.
-      type: WPRI
-      reset_val: 0
-      msb: 7
-      lsb: 6
-
-    - field_name: SPP
-      description: >
-        Previous privilege mode (VS-mode only).
-      type: WARL
-      reset_val: 0
-      msb: 5
-      lsb: 5
-
-    - field_name: SPIE
-      description: >
-        Previous interrupt-enable bit.
-      type: WARL
-      reset_val: 0
-      msb: 4
-      lsb: 4
-
-    - field_name: UPIE
-      description: >
-        Previous U-mode interrupt-enable bit.
-      type: WARL
-      reset_val: 0
-      msb: 3
-      lsb: 3
-
-    - field_name: SIE
-      description: >
-        Supervisor interrupt-enable bit.
-      type: WARL
-      reset_val: 0
-      msb: 1
-      lsb: 1
-
-    - field_name: UIE
-      description: >
-        User interrupt-enable bit.
-      type: WARL
-      reset_val: 0
-      msb: 0
-      lsb: 0
-
-  rv64:
-    - field_name: SD
-      description: >
-        Summary dirty bit.
-      type: R
-      reset_val: 0
-      msb: 63
-      lsb: 63
-
-    - field_name: WPRI_62_19
-      description: >
-        Reserved.
-      type: WPRI
-      reset_val: 0
-      msb: 62
-      lsb: 19
-
-    - field definitions below (MXR, SUM, VS, FS, XS, UXL, etc.)
-      are identical to rv32 positions.
-- csr: vstvec
-  description: >
-    Virtual Supervisor Trap Vector Base Address
-  address: 0x205
-  privilege_mode: S
-  rv32:
-    - field_name: BASE
-      description: >
-        Trap handler base address (aligned to 4 bytes).
-      type: WARL
-      reset_val: 0
-      msb: 31
-      lsb: 2
-      warl_legalize: |
-        # Force alignment to 4 bytes
-        val_out = val_in & ~0x3
-
-    - field_name: MODE
-      description: >
-        Trap mode: 0=Direct, 1=Vectored.
-      type: WARL
-      reset_val: 0
-      msb: 1
-      lsb: 0
-      warl_legalize: |
-        # Only 0 or 1 allowed
-        val_out = 0 if val_in == 0 else 1
-
-  rv64:
-    - field_name: BASE
-      description: >
-        Trap handler base address.
-      type: WARL
-      reset_val: 0
-      msb: 63
-      lsb: 2
-      warl_legalize: |
-        val_out = val_in & ~0x3
-
-    - field_name: MODE
-      description: >
-        Trap mode.
-      type: WARL
-      reset_val: 0
-      msb: 1
-      lsb: 0
-      warl_legalize: |
-        val_out = 0 if val_in == 0 else 1
-- csr: vsepc
-  description: >
-    Virtual Supervisor Exception Program Counter
-  address: 0x241
-  privilege_mode: S
-  rv32:
-    - field_name: PC
-      description: >
-        Saved PC, bit 0 always zero.
-      type: WARL
-      reset_val: 0
-      msb: 31
-      lsb: 1
-      warl_legalize: |
-        # Force PC alignment
-        val_out = val_in & ~0x1
-
-    - field_name: ZERO
-      description: >
-        Always zero.
-      type: R
-      reset_val: 0
-      msb: 0
-      lsb: 0
-
-  rv64:
-    - field_name: PC
-      description: >
-        Saved PC.
-      type: WARL
-      reset_val: 0
-      msb: 63
-      lsb: 1
-      warl_legalize: |
-        val_out = val_in & ~0x1
-
-    - field_name: ZERO
-      type: R
-      reset_val: 0
-      msb: 0
-      lsb: 0
-- csr: vscause
-  description: >
-    Virtual Supervisor Trap Cause Register
-  address: 0x242
-  privilege_mode: S
-  rv32:
-    - field_name: Interrupt
-      description: >
-        1=interrupt, 0=exception.
-      type: WARL
-      reset_val: 0
-      msb: 31
-      lsb: 31
-
-    - field_name: ExceptionCode
-      description: >
-        Exception or interrupt cause code.
-      type: WARL
-      reset_val: 0
-      msb: 30
-      lsb: 0
-
-  rv64:
-    - field_name: Interrupt
-      type: WARL
-      reset_val: 0
-      msb: 63
-      lsb: 63
-
-    - field_name: ExceptionCode
-      type: WARL
-      reset_val: 0
-      msb: 62
-      lsb: 0
-- csr: vstval
-  description: >
-    Virtual Supervisor Trap Value
-  address: 0x243
-  privilege_mode: S
-  rv32:
-    - field_name: TrapValue
-      description: >
-        Trap-specific information (bad address, instruction bits, etc.)
-      type: WARL
-      reset_val: 0
-      msb: 31
-      lsb: 0
-
-  rv64:
-    - field_name: TrapValue
-      type: WARL
-      reset_val: 0
-      msb: 63
-      lsb: 0
