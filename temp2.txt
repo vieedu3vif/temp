@@ -1,0 +1,280 @@
+- csr: vsstatus
+  description: >
+    Virtual Supervisor Status Register
+  address: 0x200
+  privilege_mode: S
+  rv32:
+    - field_name: SD
+      description: >
+        Summary dirty bit. Read-only. Indicates FS/VS/XS are dirty.
+      type: R
+      reset_val: 0
+      msb: 31
+      lsb: 31
+
+    - field_name: WPRI_30_19
+      description: >
+        Reserved, read as zero.
+      type: WPRI
+      reset_val: 0
+      msb: 30
+      lsb: 19
+
+    - field_name: MXR
+      description: >
+        Make eXecutable readable.
+      type: WARL
+      reset_val: 0
+      msb: 18
+      lsb: 18
+
+    - field_name: SUM
+      description: >
+        Permit VS-mode to access user memory.
+      type: WARL
+      reset_val: 0
+      msb: 17
+      lsb: 17
+
+    - field_name: VS
+      description: >
+        Vector extension status field.
+      type: WARL
+      reset_val: 0
+      msb: 16
+      lsb: 15
+
+    - field_name: FS
+      description: >
+        Floating-point unit status.
+      type: WARL
+      reset_val: 0
+      msb: 14
+      lsb: 13
+
+    - field_name: XS
+      description: >
+        Extension status.
+      type: WARL
+      reset_val: 0
+      msb: 12
+      lsb: 11
+
+    - field_name: UXL
+      description: >
+        User-mode effective XLEN.
+      type: R
+      reset_val: 0
+      msb: 9
+      lsb: 8
+
+    - field_name: WPRI_7_6
+      description: >
+        Reserved.
+      type: WPRI
+      reset_val: 0
+      msb: 7
+      lsb: 6
+
+    - field_name: SPP
+      description: >
+        Previous privilege mode (VS-mode only).
+      type: WARL
+      reset_val: 0
+      msb: 5
+      lsb: 5
+
+    - field_name: SPIE
+      description: >
+        Previous interrupt-enable bit.
+      type: WARL
+      reset_val: 0
+      msb: 4
+      lsb: 4
+
+    - field_name: UPIE
+      description: >
+        Previous U-mode interrupt-enable bit.
+      type: WARL
+      reset_val: 0
+      msb: 3
+      lsb: 3
+
+    - field_name: SIE
+      description: >
+        Supervisor interrupt-enable bit.
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 1
+
+    - field_name: UIE
+      description: >
+        User interrupt-enable bit.
+      type: WARL
+      reset_val: 0
+      msb: 0
+      lsb: 0
+
+  rv64:
+    - field_name: SD
+      description: >
+        Summary dirty bit.
+      type: R
+      reset_val: 0
+      msb: 63
+      lsb: 63
+
+    - field_name: WPRI_62_19
+      description: >
+        Reserved.
+      type: WPRI
+      reset_val: 0
+      msb: 62
+      lsb: 19
+
+    - field definitions below (MXR, SUM, VS, FS, XS, UXL, etc.)
+      are identical to rv32 positions.
+- csr: vstvec
+  description: >
+    Virtual Supervisor Trap Vector Base Address
+  address: 0x205
+  privilege_mode: S
+  rv32:
+    - field_name: BASE
+      description: >
+        Trap handler base address (aligned to 4 bytes).
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 2
+      warl_legalize: |
+        # Force alignment to 4 bytes
+        val_out = val_in & ~0x3
+
+    - field_name: MODE
+      description: >
+        Trap mode: 0=Direct, 1=Vectored.
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 0
+      warl_legalize: |
+        # Only 0 or 1 allowed
+        val_out = 0 if val_in == 0 else 1
+
+  rv64:
+    - field_name: BASE
+      description: >
+        Trap handler base address.
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 2
+      warl_legalize: |
+        val_out = val_in & ~0x3
+
+    - field_name: MODE
+      description: >
+        Trap mode.
+      type: WARL
+      reset_val: 0
+      msb: 1
+      lsb: 0
+      warl_legalize: |
+        val_out = 0 if val_in == 0 else 1
+- csr: vsepc
+  description: >
+    Virtual Supervisor Exception Program Counter
+  address: 0x241
+  privilege_mode: S
+  rv32:
+    - field_name: PC
+      description: >
+        Saved PC, bit 0 always zero.
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 1
+      warl_legalize: |
+        # Force PC alignment
+        val_out = val_in & ~0x1
+
+    - field_name: ZERO
+      description: >
+        Always zero.
+      type: R
+      reset_val: 0
+      msb: 0
+      lsb: 0
+
+  rv64:
+    - field_name: PC
+      description: >
+        Saved PC.
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 1
+      warl_legalize: |
+        val_out = val_in & ~0x1
+
+    - field_name: ZERO
+      type: R
+      reset_val: 0
+      msb: 0
+      lsb: 0
+- csr: vscause
+  description: >
+    Virtual Supervisor Trap Cause Register
+  address: 0x242
+  privilege_mode: S
+  rv32:
+    - field_name: Interrupt
+      description: >
+        1=interrupt, 0=exception.
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 31
+
+    - field_name: ExceptionCode
+      description: >
+        Exception or interrupt cause code.
+      type: WARL
+      reset_val: 0
+      msb: 30
+      lsb: 0
+
+  rv64:
+    - field_name: Interrupt
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 63
+
+    - field_name: ExceptionCode
+      type: WARL
+      reset_val: 0
+      msb: 62
+      lsb: 0
+- csr: vstval
+  description: >
+    Virtual Supervisor Trap Value
+  address: 0x243
+  privilege_mode: S
+  rv32:
+    - field_name: TrapValue
+      description: >
+        Trap-specific information (bad address, instruction bits, etc.)
+      type: WARL
+      reset_val: 0
+      msb: 31
+      lsb: 0
+
+  rv64:
+    - field_name: TrapValue
+      type: WARL
+      reset_val: 0
+      msb: 63
+      lsb: 0
