@@ -1,288 +1,432 @@
-- csr: hstatus  
-  description: >  
-    Hypervisor status register. Kiểm soát trạng thái virtualization ở HS-mode.  
-  address: 0x600  
-  privilege_mode: H  
-  rv32:  
-    - field_name: SPV  
-      description: >  
-        Previous virtualisation mode (Saved V bit)  
-      type: WARL  
-      reset_val: 0  
-      msb: 0  
-      lsb: 0  
-    - field_name: VIEN  
-      description: >  
-        Virtual Interrupt Enable (for VS-mode)  
-      type: WARL  
-      reset_val: 0  
-      msb: 1  
-      lsb: 1  
-    # ... (còn các bit khác như SPVP, WPRI hoặc reserved)  
-  rv64:  
-    - field_name: SPV  
-      description: >  
-        Previous virtualization mode  
-      type: WARL  
-      reset_val: 0  
-      msb: 0  
-      lsb: 0  
-    - field_name: VIEN  
-      description: >  
-        Virtual interrupt enable  
-      type: WARL  
-      reset_val: 0  
-      msb: 1  
-      lsb: 1  
-    # ... các field khác tùy spec  
+# mode_switch_test.S
+# Pure RISC-V assembly - no pseudo instructions with complex operands
+# Test M/S/U mode switching with virtual memory
 
-- csr: hedeleg  
-  description: >  
-    Hypervisor exception delegation register. Dùng để ủy quyền exception từ HS-mode xuống VS-mode nếu V = 1.  
-  address: 0x602  
-  privilege_mode: H  
-  rv32:  
-    - field_name: EXCEPT_DELEG  
-      description: >  
-        Bits đại diện các loại exception có thể ủy quyền.  
-      type: WARL  
-      reset_val: 0  
-      msb: 31  
-      lsb: 0  
-  rv64:  
-    - field_name: EXCEPT_DELEG  
-      description: >  
-        Exception delegation bits.  
-      type: WARL  
-      reset_val: 0  
-      msb: 63  
-      lsb: 0  
+.section .text.init
+.globl _start
 
-- csr: hideleg  
-  description: >  
-    Hypervisor interrupt delegation register. Dùng để ủy quyền interrupt từ HS → VS nếu bit tương ứng = 1.  
-  address: 0x603  
-  privilege_mode: H  
-  rv32:  
-    - field_name: INT_DELEG  
-      description: >  
-        Các bit interrupt VS-level có thể được ủy quyền.  
-      type: WARL  
-      reset_val: 0  
-      msb: 31  
-      lsb: 0  
-  rv64:  
-    - field_name: INT_DELEG  
-      description: >  
-        Interrupt delegation bits.  
-      type: WARL  
-      reset_val: 0  
-      msb: 63  
-      lsb: 0  
+#==============================================================================
+# Entry Point
+#==============================================================================
+_start:
+    # Initialize stack pointer
+    lui sp, 0x80010
+    
+    # Jump to main
+    jal x0, main
 
-- csr: hie  
-  description: >  
-    Hypervisor interrupt-enable register. Chứa các bit cho phép interrupt VS‑level / hypervisor‑specific.  
-  address: 0x604  
-  privilege_mode: H  
-  rv32:  
-    - field_name: VSEIE  
-      description: >  
-        Enable VS-level external interrupt.  
-      type: WARL  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIE  
-      description: >  
-        Enable VS-level timer interrupt.  
-      type: WARL  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIE  
-      description: >  
-        Enable VS-level software interrupt.  
-      type: WARL  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
-    # … và các bit khác tùy spec  
-  rv64:  
-    - field_name: VSEIE  
-      description: >  
-        VS external interrupt enable  
-      type: WARL  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIE  
-      description: >  
-        VS timer interrupt enable  
-      type: WARL  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIE  
-      description: >  
-        VS software interrupt enable  
-      type: WARL  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
+#==============================================================================
+# Physical Code Sections (aligned)
+#==============================================================================
+.align 8
+smode_code_start:
+    # S-mode test code
+    lui a0, 0xA
+    addi a0, a0, 0x111          # a0 = 0xA111 (S-mode marker)
+    
+    # Load from data region (VA = 0x140000000)
+    lui a5, 0x14000
+    slli a5, a5, 4
+    lw a1, 0(a5)
+    addi a1, a1, 1
+    sw a1, 0(a5)                # Increment data[0]
+    
+    # Return
+    jalr x0, ra, 0
 
-- csr: hip  
-  description: >  
-    Hypervisor interrupt-pending register. Chỉ ra các interrupt VS-level / hypervisor đang chờ.  
-  address: 0x644  
-  privilege_mode: H  
-  rv32:  
-    - field_name: VSEIP  
-      description: >  
-        VS external interrupt pending.  
-      type: WPRI  # hoặc WARL tùy spec  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIP  
-      description: >  
-        VS timer interrupt pending.  
-      type: WPRI  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIP  
-      description: >  
-        VS software interrupt pending.  
-      type: WPRI  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
-    # … các bit khác  
-  rv64:  
-    - field_name: VSEIP  
-      description: >  
-        VS external interrupt pending.  
-      type: WPRI  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIP  
-      description: >  
-        VS timer interrupt pending.  
-      type: WPRI  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIP  
-      description: >  
-        VS software interrupt pending.  
-      type: WPRI  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
+.align 8
+umode_code_start:
+    # U-mode test code
+    lui a0, 0xB
+    addi a0, a0, 0x222          # a0 = 0xB222 (U-mode marker)
+    
+    # Load from data region (VA = 0x140000000)
+    lui a5, 0x14000
+    slli a5, a5, 4
+    lw a1, 4(a5)
+    addi a1, a1, 1
+    sw a1, 4(a5)                # Increment data[1]
+    
+    # Return via ecall
+    ecall
 
-- csr: hvip  
-  description: >  
-    Hypervisor virtual-interrupt-pending register. Hypervisor dùng để “inject” interrupt ảo vào VS-mode.  
-  address: 0x645  
-  privilege_mode: H  
-  rv32:  
-    - field_name: VSEIP  
-      description: >  
-        VS external interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIP  
-      description: >  
-        VS timer interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIP  
-      description: >  
-        VS software interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
-    # …  
-  rv64:  
-    - field_name: VSEIP  
-      description: >  
-        VS external interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 10  
-      lsb: 10  
-    - field_name: VSTIP  
-      description: >  
-        VS timer interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 6  
-      lsb: 6  
-    - field_name: VSSIP  
-      description: >  
-        VS software interrupt inject.  
-      type: WARL  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
+.align 8
+data_region:
+    .word 0x00000000            # data[0] - S-mode modifies
+    .word 0x00000000            # data[1] - U-mode modifies
+    .word 0xDEADBEEF
+    .word 0xCAFEBABE
 
-- csr: hcounteren  
-  description: >  
-    Hypervisor counter‑enable register. Quyền truy cập các bộ đếm (counters) trong VS-mode.  
-  address: 0x606  
-  privilege_mode: H  
-  rv32:  
-    - field_name: CYCLEEN  
-      description: >  
-        Cho phép VS-mode đọc bộ đếm cycle.  
-      type: WARL  
-      reset_val: 0  
-      msb: 0  
-      lsb: 0  
-    - field_name: TIMEEN  
-      description: >  
-        Cho phép VS-mode đọc time (timer) counter.  
-      type: WARL  
-      reset_val: 0  
-      msb: 1  
-      lsb: 1  
-    - field_name: INSTRETEN  
-      description: >  
-        Cho phép VS-mode đọc bộ đếm số lệnh (instruction retired).  
-      type: WARL  
-      reset_val: 0  
-      msb: 2  
-      lsb: 2  
-    # … các counter khác tùy spec  
-  rv64:  
-    tương tự như rv32 (các bit enable bộ đếm)  
+.align 12
+# Page tables (4KB aligned)
+page_table_root:
+    .space 4096
 
-- csr: htval  
-  description: >  
-    Hypervisor trap value register: lưu giá trị tval (giá trị lỗi) cho trap HS → VS hoặc VS → HS.  
-  address: 0x643  
-  privilege_mode: H  
-  rv32:  
-    - field_name: HTVAL  
-      description: >  
-        Lưu giá trị exception / trap fault cho hypervisor.  
-      type: WARL  
-      reset_val: 0  
-      msb: 31  
-      lsb: 0  
-  rv64:  
-    - field_name: HTVAL  
-      description: >  
-        Hypervisor tval (trap value).  
-      type: WARL  
-      reset_val: 0  
-      msb: 63  
-      lsb: 0  
+page_table_l1:
+    .space 4096
 
+page_table_l0:
+    .space 4096
+
+#==============================================================================
+# Signature output area
+#==============================================================================
+.align 8
+signature_start:
+    .word 0xF00DCAFE
+signature_data:
+    .space 512
+signature_end:
+    .word 0xDEADBEEF
+
+#==============================================================================
+# Main Program
+#==============================================================================
+.align 8
+main:
+    # Save signature pointer
+    auipc s11, 0
+    addi s11, s11, 0            # Will adjust manually
+    
+    # Calculate signature_data address
+    lui t0, %hi(signature_data)
+    addi s11, t0, %lo(signature_data)
+    
+    #==========================================================================
+    # Step 1: Setup PMP (allow all memory)
+    #==========================================================================
+    
+    # PMP entry 0: lower bound = 0
+    addi t0, x0, 0
+    csrw 0x3B0, t0              # pmpaddr0
+    
+    # PMP entry 1: upper bound = max
+    addi t0, x0, -1
+    srli t0, t0, 2
+    csrw 0x3B1, t0              # pmpaddr1
+    
+    # Configure pmpcfg0: entry 1 = TOR, RWX
+    # Byte 1 = 0x0F (TOR=01, X=1, W=1, R=1)
+    lui t0, 0
+    addi t0, t0, 0x0F
+    slli t0, t0, 8              # Shift to byte 1
+    csrw 0x3A0, t0              # pmpcfg0
+    
+    # Record PMP config
+    csrr t1, 0x3A0
+    sd t1, 0(s11)
+    addi s11, s11, 8
+    
+    #==========================================================================
+    # Step 2: Setup trap handlers
+    #==========================================================================
+    
+    # M-mode trap handler
+    lui t0, %hi(m_trap_handler)
+    addi t0, t0, %lo(m_trap_handler)
+    csrw 0x305, t0              # mtvec
+    
+    # S-mode trap handler
+    lui t0, %hi(s_trap_handler)
+    addi t0, t0, %lo(s_trap_handler)
+    csrw 0x105, t0              # stvec
+    
+    # No delegation
+    addi t0, x0, 0
+    csrw 0x302, t0              # medeleg
+    csrw 0x303, t0              # mideleg
+    
+    #==========================================================================
+    # Step 3: Setup page tables
+    #==========================================================================
+    
+    # Get physical addresses
+    lui t0, %hi(page_table_root)
+    addi t0, t0, %lo(page_table_root)
+    
+    lui t1, %hi(page_table_l1)
+    addi t1, t1, %lo(page_table_l1)
+    
+    lui t2, %hi(page_table_l0)
+    addi t2, t2, %lo(page_table_l0)
+    
+    lui t3, %hi(smode_code_start)
+    addi t3, t3, %lo(smode_code_start)
+    
+    lui t4, %hi(umode_code_start)
+    addi t4, t4, %lo(umode_code_start)
+    
+    lui t5, %hi(data_region)
+    addi t5, t5, %lo(data_region)
+    
+    # Root PTE[0]: Points to L1 table (for VA 0x0...)
+    srli t6, t1, 12             # PPN of L1 table
+    slli t6, t6, 10             # Shift to PTE position
+    ori t6, t6, 1               # PTE_V = 1
+    sd t6, 0(t0)
+    
+    # Root PTE[5]: Data region (VA 0x140000000)
+    # VA[38:30] = 5 for 0x140000000
+    srli t6, t5, 12             # PPN of data
+    slli t6, t6, 10
+    # Set bits: V=1, R=1, W=1, U=1, A=1, D=1
+    # Binary: 11010111 = 0xD7
+    ori t6, t6, 0xD7
+    sd t6, 40(t0)               # pte[5] = offset 40
+    
+    # Root PTE[6]: S-mode code (VA 0x180000000)
+    # VA[38:30] = 6 for 0x180000000
+    srli t6, t3, 12             # PPN of S-mode code
+    slli t6, t6, 10
+    # Set bits: V=1, R=1, X=1, A=1, D=1
+    # Binary: 11001101 = 0xCD
+    ori t6, t6, 0xCD
+    sd t6, 48(t0)               # pte[6] = offset 48
+    
+    # L1 PTE[0]: Points to L0 table
+    srli t6, t2, 12             # PPN of L0 table
+    slli t6, t6, 10
+    ori t6, t6, 1               # PTE_V = 1
+    sd t6, 0(t1)
+    
+    # L0 PTE[1]: U-mode code (VA 0x000001000)
+    # VA[20:12] = 1 for page offset 1
+    srli t6, t4, 12             # PPN of U-mode code
+    slli t6, t6, 10
+    # Set bits: V=1, R=1, X=1, U=1, A=1, D=1
+    # Binary: 11011101 = 0xDD
+    ori t6, t6, 0xDD
+    sd t6, 8(t2)                # pte[1] = offset 8
+    
+    #==========================================================================
+    # Step 4: Enable virtual memory
+    #==========================================================================
+    
+    # Setup SATP: Mode=SV39 (8), PPN=root_table
+    lui t1, %hi(page_table_root)
+    addi t1, t1, %lo(page_table_root)
+    srli t1, t1, 12             # Get PPN
+    
+    # Set mode = 8 (SV39) in bits [63:60]
+    lui t0, 0x80000             # Load upper bits
+    slli t0, t0, 32             # Shift to bit 63
+    or t1, t1, t0               # Combine mode and PPN
+    
+    csrw 0x180, t1              # satp
+    
+    # Flush TLB
+    sfence.vma
+    
+    # Record SATP
+    csrr t1, 0x180
+    sd t1, 0(s11)
+    addi s11, s11, 8
+    
+    #==========================================================================
+    # Step 5: Enable SUM bit in mstatus
+    #==========================================================================
+    
+    # SUM bit = bit 18 = 0x40000
+    lui t0, 0x40
+    csrs 0x300, t0              # mstatus |= SUM
+    
+    csrr t1, 0x300
+    sd t1, 0(s11)
+    addi s11, s11, 8
+    
+    #==========================================================================
+    # Step 6: Test loop
+    #==========================================================================
+    
+    addi s10, x0, 0             # Iteration counter
+    addi s9, x0, 5              # Number of iterations
+
+test_loop:
+    bge s10, s9, test_done
+    
+    # Record iteration
+    sd s10, 0(s11)
+    addi s11, s11, 8
+    
+    #--------------------------------------------------------------------------
+    # M-mode operation
+    #--------------------------------------------------------------------------
+    lui a0, 0
+    addi a0, a0, 0x999
+    sd a0, 0(s11)
+    addi s11, s11, 8
+    
+    #--------------------------------------------------------------------------
+    # Switch to S-mode
+    #--------------------------------------------------------------------------
+    
+    # Set MEPC to S-mode code (VA = 0x180000000)
+    lui t0, 0x18000
+    slli t0, t0, 4
+    csrw 0x341, t0              # mepc
+    
+    # Set MPP = 01 (S-mode)
+    # MPP is bits [12:11] = 0x1800
+    lui t0, 0x1
+    slli t0, t0, 11
+    csrc 0x300, t0              # Clear MPP
+    
+    lui t0, 0
+    addi t0, t0, 1
+    slli t0, t0, 11
+    csrs 0x300, t0              # Set MPP = 01
+    
+    # Save return address
+    lui ra, %hi(return_from_smode)
+    addi ra, ra, %lo(return_from_smode)
+    
+    # Jump to S-mode
+    mret
+
+return_from_smode:
+    # Record S-mode result
+    sd a0, 0(s11)
+    addi s11, s11, 8
+    
+    #--------------------------------------------------------------------------
+    # Switch to U-mode via S-mode
+    #--------------------------------------------------------------------------
+    
+    # Enter S-mode first
+    lui t0, %hi(enter_umode_from_smode)
+    addi t0, t0, %lo(enter_umode_from_smode)
+    csrw 0x341, t0              # mepc
+    
+    # Set MPP = 01
+    lui t0, 0x1
+    slli t0, t0, 11
+    csrc 0x300, t0
+    
+    lui t0, 0
+    addi t0, t0, 1
+    slli t0, t0, 11
+    csrs 0x300, t0
+    
+    mret
+
+enter_umode_from_smode:
+    # Now in S-mode, transition to U-mode
+    
+    # Set SEPC to U-mode code (VA = 0x000001000)
+    lui t0, 0
+    addi t0, t0, 0x1000
+    csrw 0x141, t0              # sepc
+    
+    # Clear SPP bit (bit 8)
+    lui t0, 0
+    addi t0, t0, 0x100
+    csrc 0x100, t0              # sstatus
+    
+    # Save return address
+    lui ra, %hi(return_from_umode)
+    addi ra, ra, %lo(return_from_umode)
+    
+    # Jump to U-mode
+    sret
+
+return_from_umode:
+    # Back in S-mode, return to M-mode via ecall
+    ecall
+
+return_to_mmode:
+    # Back in M-mode
+    sd a0, 0(s11)
+    addi s11, s11, 8
+    
+    # Verify data
+    lui a5, 0x14000
+    slli a5, a5, 4
+    
+    lw a1, 0(a5)
+    sd a1, 0(s11)
+    addi s11, s11, 8
+    
+    lw a1, 4(a5)
+    sd a1, 0(s11)
+    addi s11, s11, 8
+    
+    # Next iteration
+    addi s10, s10, 1
+    jal x0, test_loop
+
+test_done:
+    # Completion marker
+    lui a0, 0xC0
+    addi a0, a0, 0x7EE
+    slli a0, a0, 4
+    addi a0, a0, 0xE
+    sd a0, 0(s11)
+    
+    # Disable virtual memory
+    addi t0, x0, 0
+    csrw 0x180, t0              # satp = 0
+    sfence.vma
+    
+    # End
+    jal x0, end_loop
+
+#==============================================================================
+# Trap Handlers
+#==============================================================================
+
+m_trap_handler:
+    # Save context
+    csrr t0, 0x342              # mcause
+    
+    # Check if ecall from S-mode (cause = 9)
+    addi t1, x0, 9
+    beq t0, t1, handle_ecall_from_s
+    
+    # Unknown trap - hang
+    jal x0, m_trap_handler
+
+handle_ecall_from_s:
+    # Save a0
+    addi s8, a0, 0
+    
+    # Skip ecall instruction
+    csrr t0, 0x341              # mepc
+    addi t0, t0, 4
+    csrw 0x341, t0
+    
+    # Set return address
+    lui t0, %hi(return_to_mmode)
+    addi t0, t0, %lo(return_to_mmode)
+    csrw 0x341, t0
+    
+    # Restore a0
+    addi a0, s8, 0
+    
+    mret
+
+s_trap_handler:
+    # Save context
+    csrr t0, 0x142              # scause
+    
+    # Check if ecall from U-mode (cause = 8)
+    addi t1, x0, 8
+    beq t0, t1, handle_ecall_from_u
+    
+    # Unknown trap - hang
+    jal x0, s_trap_handler
+
+handle_ecall_from_u:
+    # Skip ecall instruction
+    csrr t0, 0x141              # sepc
+    addi t0, t0, 4
+    csrw 0x141, t0
+    
+    # Return to S-mode caller
+    sret
+
+end_loop:
+    jal x0, end_loop
+
+#==============================================================================
+# End
+#==============================================================================
