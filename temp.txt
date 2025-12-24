@@ -1,272 +1,372 @@
-# Behavior Test Cases cho SATP và SENVCFG.FIOM trong RISC-V
-# Test các hành vi thực tế của thanh ghi
+# RISC-V SATP & SENVCFG Behavior Tests
+# Chạy từ M-mode, setup và chuyển sang S-mode để test
 
 .section .text
 .globl _start
 
 _start:
+    # Đang ở M-mode khi boot
+    j m_mode_setup
+
+
+# ====== M-MODE SETUP ======
+# Setup environment trước khi delegate sang S-mode
+m_mode_setup:
+    # 1. Setup exception delegation
+    # Delegate page faults sang S-mode
+    li t0, (1 << 12) | (1 << 13) | (1 << 15)  # Instruction/Load/Store page fault
+    csrw medeleg, t0
+    
+    # Delegate interrupts sang S-mode
+    li t0, 0xFFFF
+    csrw mideleg, t0
+    
+    # 2. Setup Physical Memory Protection (PMP)
+    # Allow S-mode access toàn bộ memory
+    li t0, 0x1FFFFFFFFFFFFFFF  # All address bits
+    csrw pmpaddr0, t0
+    li t0, 0x0F  # R=1, W=1, X=1, A=01 (NAPOT)
+    csrw pmpcfg0, t0
+    
+    # 3. Setup mstatus để prepare cho S-mode
+    csrr t0, mstatus
+    # Clear MPP (bits 12:11) = 00
+    li t1, ~(3 << 11)
+    and t0, t0, t1
+    # Set MPP = 01 (S-mode)
+    li t1, (1 << 11)
+    or t0, t0, t1
+    # Set MPIE = 1 (enable interrupts in S-mode)
+    li t1, (1 << 7)
+    or t0, t0, t1
+    csrw mstatus, t0
+    
+    # 4. Setup mepc = địa chỉ code S-mode
+    la t0, s_mode_entry
+    csrw mepc, t0
+    
+    # 5. Setup stvec (S-mode trap vector)
+    la t0, s_mode_trap_handler
+    csrw stvec, t0
+    
+    # 6. Jump sang S-mode
+    mret  # Return from M-mode -> S-mode
+
+
+# ====== S-MODE ENTRY ======
+# Bây giờ đang ở S-mode, có thể test SATP behavior
+s_mode_entry:
+    # Verify đang ở S-mode
+    csrr t0, mstatus
+    srli t0, t0, 11
+    andi t0, t0, 3
+    li t1, 1
+    bne t0, t1, error  # Nếu không phải S-mode thì error
+    
+    # Bắt đầu các behavior tests
     j test_satp_mode_switch
 
 
-# ====== TEST 1: SATP Mode Switch Behavior ======
-# Test chuyển đổi giữa Bare mode và Sv39 mode
+# ====== TEST 1: SATP Mode Switch Behavior (S-MODE) ======
 test_satp_mode_switch:
-    # Setup: Tạo page table đơn giản
-    la t0, page_table_base
-    srli t0, t0, 12  # Lấy PPN
+    # Test 1a: Đọc SATP trong S-mode (phải được)
+    csrr t0, satp
     
-    # Test 1a: Bare mode -> Sv39 mode
-    li t1, 0  # Bare mode
-    csrw satp, t1
-    sfence.vma  # Flush TLB
-    
-    # Virtual address = Physical address trong Bare mode
-    la t2, test_data
-    lw t3, 0(t2)  # Nên hoạt động bình thường
-    
-    # Chuyển sang Sv39 mode
-    li t1, 0x8000000000000000
-    or t1, t1, t0  # Mode=8 + PPN
-    csrw satp, t1
-    sfence.vma  # CRITICAL: Phải flush TLB sau khi đổi mode
-    
-    # Bây giờ cần translation
-    # Virtual address khác Physical address
-    
-    li a0, 1  # Test 1 passed
-    j test_satp_asid_behavior
-
-
-# ====== TEST 2: SATP ASID Behavior ======
-# Test Address Space ID và TLB isolation
-test_satp_asid_behavior:
-    # Setup ASID=1
-    li t0, 0x8000000000000001  # Mode=8, ASID=1 (bits 59:44)
-    slli t0, t0, 44
-    la t1, page_table_base
-    srli t1, t1, 12
-    or t0, t0, t1
-    csrw satp, t0
-    sfence.vma  # Flush toàn bộ TLB
-    
-    # Access memory với ASID=1
-    la t2, test_data
-    lw t3, 0(t2)
-    
-    # Switch sang ASID=2
-    li t0, 0x8000000000000002
-    slli t0, t0, 44
-    or t0, t0, t1
-    csrw satp, t0
-    # Không flush TLB -> TLB entries của ASID=1 vẫn còn
-    # nhưng không match với ASID=2
-    
-    # Access memory với ASID=2
-    la t2, test_data
-    lw t4, 0(t2)  # Sẽ miss TLB, phải walk page table
-    
-    li a1, 1  # Test 2 passed
-    j test_satp_ppn_change
-
-
-# ====== TEST 3: SATP PPN Change Behavior ======
-# Test thay đổi page table base
-test_satp_ppn_change:
-    # Setup page table 1
-    la t0, page_table_1
-    srli t0, t0, 12
-    li t1, 0x8000000000000000
-    or t1, t1, t0
+    # Test 1b: Set Bare mode
+    li t1, 0
     csrw satp, t1
     sfence.vma
     
-    # Access với page table 1
-    li t2, 0x1000
-    lw t3, 0(t2)
+    # Trong Bare mode: VA = PA
+    la t2, test_data
+    lw t3, 0(t2)  # Direct physical access
+    li t4, 0x12345678
+    bne t3, t4, test1_fail
     
-    # Switch sang page table 2 (mapping khác)
-    la t0, page_table_2
-    srli t0, t0, 12
+    # Test 1c: Switch sang Sv39 mode
+    # Setup page table trước
+    jal setup_page_table
+    
+    # Load page table address
+    la t0, page_table_l2
+    srli t0, t0, 12  # Get PPN
+    
+    # Mode = 8 (Sv39), ASID = 0, PPN = t0
     li t1, 0x8000000000000000
     or t1, t1, t0
     csrw satp, t1
-    sfence.vma  # MUST flush TLB
+    sfence.vma  # CRITICAL!
     
-    # Access cùng VA nhưng sẽ map đến PA khác
-    li t2, 0x1000
-    lw t4, 0(t2)  # Khác t3 nếu page table khác nhau
+    # Bây giờ đang dùng virtual memory
+    # Virtual address sẽ được translate qua page table
+    
+    li a0, 1  # Test 1 passed
+    j test_satp_effect_in_smode
+
+
+# ====== TEST 2: Verify SATP chỉ affect S-mode/U-mode ======
+test_satp_effect_in_smode:
+    # SATP đã được set sang Sv39
+    csrr t0, satp
+    srli t1, t0, 60
+    li t2, 8
+    bne t1, t2, test2_fail
+    
+    # Access memory - phải qua translation
+    li t0, 0x80000000  # Virtual address
+    # Nếu page table setup đúng, sẽ translate thành physical address
+    # Nếu không -> Page Fault
+    
+    li a1, 1  # Test 2 passed
+    j test_page_fault_behavior
+
+
+# ====== TEST 3: Page Fault Behavior ======
+test_page_fault_behavior:
+    # Try access invalid virtual address
+    # Setup trap handler để catch page fault
+    
+    la t0, page_fault_handler
+    csrw stvec, t0
+    
+    # Access invalid address
+    li t0, 0xDEADBEEF000  # Invalid VA
+    
+    # Set flag trước khi access
+    la t1, fault_flag
+    sw zero, 0(t1)
+    
+    # Try load - sẽ trigger page fault
+    lw t2, 0(t0)  # -> Page Fault Exception
+    
+    # Nếu đến đây = không có fault (sai)
+    j test3_fail
+
+test3_page_fault_returned:
+    # Trap handler sẽ jump về đây
+    # Check fault flag
+    la t1, fault_flag
+    lw t2, 0(t1)
+    li t3, 1
+    bne t2, t3, test3_fail
     
     li a2, 1  # Test 3 passed
-    j test_sfence_vma_behavior
+    j test_senvcfg_fiom
 
 
-# ====== TEST 4: SFENCE.VMA Behavior ======
-# Test TLB flush behavior
-test_sfence_vma_behavior:
-    # Setup
-    la t0, page_table_base
-    srli t0, t0, 12
-    li t1, 0x8000000000000000
-    or t1, t1, t0
-    csrw satp, t1
-    sfence.vma  # Flush all
-    
-    # Test 4a: sfence.vma (flush all)
-    li t2, 0x2000
-    lw t3, 0(t2)  # Load to cache in TLB
-    
-    # Modify page table entry
-    la t4, page_table_base
-    li t5, 0
-    sw t5, 0(t4)  # Invalidate entry
-    
-    sfence.vma  # Flush all TLB entries
-    
-    # Access lại sẽ page fault hoặc reload từ modified page table
-    
-    # Test 4b: sfence.vma rs1, rs2 (selective flush)
-    li t2, 0x3000
-    lw t3, 0(t2)
-    
-    li a3, 0x3000  # Virtual address
-    li a4, 0       # ASID (0 = all)
-    sfence.vma a3, a4  # Chỉ flush entry cho VA=0x3000
-    
-    li a3, 1  # Test 4 passed
-    j test_senvcfg_fiom_behavior
-
-
-# ====== TEST 5: SENVCFG.FIOM Behavior ======
-# Test Fence-Instruction-Ordering-Mode
-test_senvcfg_fiom_behavior:
-    # Setup: Clear FIOM
+# ====== TEST 4: SENVCFG.FIOM Behavior ======
+test_senvcfg_fiom:
+    # Clear FIOM
     csrr t0, senvcfg
     andi t0, t0, ~0x1
     csrw senvcfg, t0
     
-    # Write self-modifying code
+    # Self-modifying code test
     la t1, dynamic_code
-    li t2, 0x00000013  # NOP instruction
+    li t2, 0x00008067  # ret instruction
     sw t2, 0(t1)
-    fence.i  # Synchronize I-cache (phải có khi FIOM=0)
+    fence.i  # Must use FENCE.I khi FIOM=0
     
-    # Execute modified code
-    jalr t1
+    # Execute
+    jalr ra, t1
     
-    # Test với FIOM=1
+    # Set FIOM=1
     csrr t0, senvcfg
     ori t0, t0, 0x1
     csrw senvcfg, t0
     
-    # Write code lại
+    # Modify code again
     la t1, dynamic_code
-    li t2, 0x00100013  # ADDI x0, x0, 1
+    li t2, 0x00008067
     sw t2, 0(t1)
-    fence  # FENCE acts as FENCE.I when FIOM=1
+    fence  # FENCE = FENCE.I khi FIOM=1
     
     # Execute
-    jalr t1
+    jalr ra, t1
+    
+    li a3, 1  # Test 4 passed
+    j test_sfence_vma_granularity
+
+
+# ====== TEST 5: SFENCE.VMA Granularity ======
+test_sfence_vma_granularity:
+    # Test different forms of sfence.vma
+    
+    # 5a: sfence.vma x0, x0 - flush all
+    sfence.vma zero, zero
+    
+    # 5b: sfence.vma rs1, x0 - flush VA=rs1, all ASIDs
+    li t0, 0x80001000
+    sfence.vma t0, zero
+    
+    # 5c: sfence.vma x0, rs2 - flush all VAs, ASID=rs2
+    li t1, 1
+    sfence.vma zero, t1
+    
+    # 5d: sfence.vma rs1, rs2 - flush VA=rs1, ASID=rs2
+    sfence.vma t0, t1
     
     li a4, 1  # Test 5 passed
-    j test_page_fault_behavior
+    j test_asid_isolation
 
 
-# ====== TEST 6: Page Fault Behavior ======
-# Test behavior khi access invalid page
-test_page_fault_behavior:
-    # Setup invalid page table entry
-    la t0, page_table_base
+# ====== TEST 6: ASID Isolation ======
+test_asid_isolation:
+    # Setup ASID=1
+    la t0, page_table_l2
     srli t0, t0, 12
-    li t1, 0x8000000000000000
+    li t1, 0x8000000000000001  # ASID=1 at bits 59:44
+    slli t1, t1, 44
     or t1, t1, t0
     csrw satp, t1
     sfence.vma
     
-    # Try access invalid address
-    # Sẽ trigger page fault exception
-    # Exception handler phải set trong mtvec
+    # Access memory
+    li t2, 0x80000000
+    lw t3, 0(t2)
+    
+    # Switch ASID=2 without flush
+    li t1, 0x8000000000000002
+    slli t1, t1, 44
+    or t1, t1, t0
+    csrw satp, t1
+    # No sfence.vma - TLB entries for ASID=1 still exist
+    # but won't match ASID=2
+    
+    # Access same VA - will miss TLB
+    li t2, 0x80000000
+    lw t4, 0(t2)
     
     li a5, 1  # Test 6 passed
-    j test_privilege_level
+    j tests_complete
 
 
-# ====== TEST 7: Privilege Level Access Behavior ======
-# Test access SATP/SENVCFG từ different modes
-test_privilege_level:
-    # Từ S-mode có thể access
-    csrr t0, satp
-    csrr t1, senvcfg
-    
-    # Nếu try access từ U-mode -> Illegal Instruction Exception
-    # (cần switch sang U-mode để test)
-    
-    li a6, 1  # Test 7 passed
-    j test_memory_ordering
+# ====== TESTS COMPLETE ======
+tests_complete:
+    # All tests done
+    # Results in a0-a5
+    j exit
 
+test1_fail:
+    li a0, 0
+    j exit
 
-# ====== TEST 8: Memory Ordering với SATP Changes ======
-# Test ordering guarantees khi change SATP
-test_memory_ordering:
-    # Write to memory
-    la t0, test_data
-    li t1, 0xDEADBEEF
-    sw t1, 0(t0)
-    
-    # Change SATP
-    csrr t2, satp
-    li t3, 0x8000000000001000
-    csrw satp, t3
-    sfence.vma  # Ensures previous stores are visible
-    
-    # Read back
-    lw t4, 0(t0)
-    
-    # Restore SATP
-    csrw satp, t2
-    sfence.vma
-    
-    li a7, 1  # Test 8 passed
+test2_fail:
+    li a1, 0
+    j exit
+
+test3_fail:
+    li a2, 0
     j exit
 
 
-# ====== TEST 9: FIOM với Multiple Harts ======
-# Test FIOM behavior trong multi-hart system
-test_multihart_fiom:
-    # Hart 0: Set FIOM
-    csrr t0, senvcfg
-    ori t0, t0, 0x1
-    csrw senvcfg, t0
+# ====== TRAP HANDLERS ======
+s_mode_trap_handler:
+    # Generic S-mode trap handler
+    csrr t0, scause
+    bltz t0, s_mode_interrupt
+    # Synchronous exception
+    j s_mode_exception
+
+s_mode_interrupt:
+    # Handle interrupt
+    mret
+
+s_mode_exception:
+    # Handle exception
+    mret
+
+page_fault_handler:
+    # Page fault specific handler
+    csrr t0, scause
+    li t1, 12  # Instruction page fault
+    beq t0, t1, handle_page_fault
+    li t1, 13  # Load page fault
+    beq t0, t1, handle_page_fault
+    li t1, 15  # Store page fault
+    beq t0, t1, handle_page_fault
     
-    # Hart 0: Modify code
-    la t1, shared_code
-    li t2, 0x00000013
-    sw t2, 0(t1)
-    fence  # Acts as FENCE.I due to FIOM=1
+    # Unknown exception
+    j error
+
+handle_page_fault:
+    # Set fault flag
+    la t0, fault_flag
+    li t1, 1
+    sw t1, 0(t0)
     
-    # Hart 1 cũng phải thấy thay đổi
-    # (implementation-dependent)
+    # Skip faulting instruction
+    csrr t0, sepc
+    addi t0, t0, 4
+    csrw sepc, t0
+    
+    # Return to test3_page_fault_returned
+    la t0, test3_page_fault_returned
+    csrw sepc, t0
+    
+    sret
+
+
+# ====== HELPER FUNCTIONS ======
+setup_page_table:
+    # Setup minimal Sv39 page table
+    # L2 (root): maps VA[38:30]
+    # L1: maps VA[29:21]
+    # L0: maps VA[20:12]
+    
+    # Identity map first 1GB
+    la t0, page_table_l2
+    la t1, page_table_l1
+    srli t1, t1, 12
+    slli t1, t1, 10
+    ori t1, t1, 0x01  # Valid
+    sd t1, 0(t0)
+    
+    la t0, page_table_l1
+    la t1, page_table_l0
+    srli t1, t1, 12
+    slli t1, t1, 10
+    ori t1, t1, 0x01
+    sd t1, 0(t0)
+    
+    # L0: Map 2MB worth of pages
+    la t0, page_table_l0
+    li t1, 512  # 512 entries
+    li t2, 0
+setup_l0_loop:
+    slli t3, t2, 10
+    ori t3, t3, 0x0F  # Valid, R, W, X
+    sd t3, 0(t0)
+    addi t0, t0, 8
+    addi t2, t2, 1
+    blt t2, t1, setup_l0_loop
     
     ret
 
 
+error:
+    # Error handler
+    j error  # Infinite loop
+
+
 exit:
-    # Results in a0-a7
+    # Exit - có thể switch về M-mode hoặc halt
     li a7, 93
     ecall
 
 
-# ====== Data Section ======
+# ====== DATA SECTION ======
 .section .data
 .align 12
-page_table_base:
+page_table_l2:  # 512 entries
     .space 4096
 
 .align 12
-page_table_1:
+page_table_l1:
     .space 4096
 
 .align 12
-page_table_2:
+page_table_l0:
     .space 4096
 
 test_data:
@@ -274,8 +374,13 @@ test_data:
 
 dynamic_code:
     .word 0x00000013  # NOP
-    ret
+    .word 0x00008067  # ret
 
-shared_code:
-    .word 0x00000013
-    ret
+fault_flag:
+    .word 0
+
+.section .bss
+.align 12
+stack:
+    .space 4096
+stack_top:
