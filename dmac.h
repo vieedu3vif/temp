@@ -1,17 +1,24 @@
 /**
  * @file  dw_ahb_dmac_regs.h
- * @brief DesignWare AHB DMA Controller (DW_ahb_dmac v2.24a) - Register Map
+ * @brief DW_ahb_dmac v2.24a  –  Register map & bit-field definitions
  *
  * Cấu hình phần cứng:
- *   - 8 channel tối đa
- *   - CTL  : 1 thanh ghi 64-bit, offset 0x18 (KHÔNG tách Hi/Lo)
- *   - CFG  : 1 thanh ghi 64-bit, offset 0x40 (KHÔNG tách Hi/Lo)
- *   - SAR, DAR, LLP : 32-bit
- *   - Stride mỗi channel: 0x58 bytes
+ *   - 8 channel, stride 0x58 bytes/channel
+ *   - CTL : 1 thanh ghi 64-bit, per-channel offset 0x18
+ *   - CFG : 1 thanh ghi 64-bit, per-channel offset 0x40
  *   - DMAC_BASE = 0x70000000
  *
- * Truy cập thanh ghi 64-bit trên AHB 32-bit:
- *   Ghi word thấp (offset+0) trước, sau đó word cao (offset+4).
+ * Lưu ý truy cập 64-bit trên AHB 32-bit:
+ *   Ghi low-word (offset + 0) TRƯỚC, sau đó high-word (offset + 4).
+ *
+ * LLI memory layout (28 bytes, hardware-defined):
+ *   +00  SAR    (u32)
+ *   +04  DAR    (u32)
+ *   +08  LLP    (u32)
+ *   +12  CTL_LO (u32)   <-- bits [31:0]  của CTL
+ *   +16  CTL_HI (u32)   <-- bits [63:32] của CTL
+ *   +20  SSTAT  (u32)
+ *   +24  DSTAT  (u32)
  */
 
 #ifndef DW_AHB_DMAC_REGS_H
@@ -20,51 +27,61 @@
 #include <stdint.h>
 
 /* ===========================================================================
- * Base address DMAC
+ * Base address
  * =========================================================================*/
 #ifndef DMAC_BASE
 #define DMAC_BASE           0x70000000UL
 #endif
 
 /* ===========================================================================
- * Per-Channel Register Offsets  (stride = 0x58 mỗi channel)
+ * Per-Channel Register Offsets  (stride = 0x58 per channel)
+ *
+ *  Mỗi slot là 8 bytes (do bus 64-bit), kể cả các register 32-bit.
  * =========================================================================*/
 #define DMAC_CH_STRIDE      0x58U
 
-#define CH_SAR_OFF          0x000U  /* Source Address Register     (32-bit) */
-#define CH_DAR_OFF          0x008U  /* Destination Address Register(32-bit) */
-#define CH_LLP_OFF          0x010U  /* Linked List Pointer         (32-bit) */
-#define CH_CTL_OFF          0x018U  /* Channel Control Register    (64-bit) */
-#define CH_SSTAT_OFF        0x020U  /* Source Status Register      (32-bit) */
-#define CH_DSTAT_OFF        0x028U  /* Destination Status Register (32-bit) */
-#define CH_SSTATAR_OFF      0x030U  /* Source Status Addr Reg      (32-bit) */
-#define CH_DSTATAR_OFF      0x038U  /* Dest Status Addr Register   (32-bit) */
-#define CH_CFG_OFF          0x040U  /* Channel Config Register     (64-bit) */
-#define CH_SGR_OFF          0x048U  /* Source Gather Register      (32-bit) */
-#define CH_DSR_OFF          0x050U  /* Destination Scatter Register(32-bit) */
+#define CH_SAR_OFF          0x000U   /* Source Address Reg        32-bit  */
+#define CH_DAR_OFF          0x008U   /* Destination Address Reg   32-bit  */
+#define CH_LLP_OFF          0x010U   /* Linked List Pointer Reg   32-bit  */
+#define CH_CTL_OFF          0x018U   /* Channel Control Reg       64-bit  */
+#define CH_SSTAT_OFF        0x020U   /* Source Status Reg         32-bit  */
+#define CH_DSTAT_OFF        0x028U   /* Destination Status Reg    32-bit  */
+#define CH_SSTATAR_OFF      0x030U   /* Source Status Addr Reg    32-bit  */
+#define CH_DSTATAR_OFF      0x038U   /* Dest Status Addr Reg      32-bit  */
+#define CH_CFG_OFF          0x040U   /* Channel Config Reg        64-bit  */
+#define CH_SGR_OFF          0x048U   /* Source Gather Reg         32-bit  */
+#define CH_DSR_OFF          0x050U   /* Destination Scatter Reg   32-bit  */
+
+/* Word offsets cho low/high của 64-bit registers */
+#define CH_CTL_LO_OFF       (CH_CTL_OFF + 0U)   /* CTL bits [31:0]   */
+#define CH_CTL_HI_OFF       (CH_CTL_OFF + 4U)   /* CTL bits [63:32]  */
+#define CH_CFG_LO_OFF       (CH_CFG_OFF + 0U)   /* CFG bits [31:0]   */
+#define CH_CFG_HI_OFF       (CH_CFG_OFF + 4U)   /* CFG bits [63:32]  */
 
 /* Channel register address macros */
 #define DMAC_CH_BASE(ch)    (DMAC_BASE + (uint32_t)(ch) * DMAC_CH_STRIDE)
 #define DMAC_SAR(ch)        (DMAC_CH_BASE(ch) + CH_SAR_OFF)
 #define DMAC_DAR(ch)        (DMAC_CH_BASE(ch) + CH_DAR_OFF)
 #define DMAC_LLP(ch)        (DMAC_CH_BASE(ch) + CH_LLP_OFF)
-#define DMAC_CTL(ch)        (DMAC_CH_BASE(ch) + CH_CTL_OFF)   /* 64-bit */
+#define DMAC_CTL_LO(ch)     (DMAC_CH_BASE(ch) + CH_CTL_LO_OFF)
+#define DMAC_CTL_HI(ch)     (DMAC_CH_BASE(ch) + CH_CTL_HI_OFF)
 #define DMAC_SSTAT(ch)      (DMAC_CH_BASE(ch) + CH_SSTAT_OFF)
 #define DMAC_DSTAT(ch)      (DMAC_CH_BASE(ch) + CH_DSTAT_OFF)
 #define DMAC_SSTATAR(ch)    (DMAC_CH_BASE(ch) + CH_SSTATAR_OFF)
 #define DMAC_DSTATAR(ch)    (DMAC_CH_BASE(ch) + CH_DSTATAR_OFF)
-#define DMAC_CFG(ch)        (DMAC_CH_BASE(ch) + CH_CFG_OFF)   /* 64-bit */
+#define DMAC_CFG_LO(ch)     (DMAC_CH_BASE(ch) + CH_CFG_LO_OFF)
+#define DMAC_CFG_HI(ch)     (DMAC_CH_BASE(ch) + CH_CFG_HI_OFF)
 #define DMAC_SGR(ch)        (DMAC_CH_BASE(ch) + CH_SGR_OFF)
 #define DMAC_DSR(ch)        (DMAC_CH_BASE(ch) + CH_DSR_OFF)
 
 /* ===========================================================================
- * Global Register Offsets (từ DMAC_BASE, tất cả 32-bit trừ ghi chú)
+ * Global Register Offsets (từ DMAC_BASE)
  * =========================================================================*/
-#define DMAC_RAW_TFR_OFF        0x2C0U  /* Raw Transfer-Complete Interrupt    */
-#define DMAC_RAW_BLOCK_OFF      0x2C8U  /* Raw Block-Complete Interrupt       */
-#define DMAC_RAW_SRCTRAN_OFF    0x2D0U  /* Raw Source-Transaction Interrupt   */
-#define DMAC_RAW_DSTTRAN_OFF    0x2D8U  /* Raw Dest-Transaction Interrupt     */
-#define DMAC_RAW_ERR_OFF        0x2E0U  /* Raw Error Interrupt                */
+#define DMAC_RAW_TFR_OFF        0x2C0U
+#define DMAC_RAW_BLOCK_OFF      0x2C8U
+#define DMAC_RAW_SRCTRAN_OFF    0x2D0U
+#define DMAC_RAW_DSTTRAN_OFF    0x2D8U
+#define DMAC_RAW_ERR_OFF        0x2E0U
 #define DMAC_STATUS_TFR_OFF     0x2E8U
 #define DMAC_STATUS_BLOCK_OFF   0x2F0U
 #define DMAC_STATUS_SRCTRAN_OFF 0x2F8U
@@ -80,19 +97,16 @@
 #define DMAC_CLEAR_SRCTRAN_OFF  0x348U
 #define DMAC_CLEAR_DSTTRAN_OFF  0x350U
 #define DMAC_CLEAR_ERR_OFF      0x358U
-#define DMAC_STATUS_INT_OFF     0x360U  /* Combined Interrupt Status (RO)     */
-/* Software Handshaking Registers */
-#define DMAC_REQ_SRC_OFF        0x368U  /* Burst Src Transaction Request      */
-#define DMAC_REQ_DST_OFF        0x370U  /* Burst Dst Transaction Request      */
-#define DMAC_SGLREQ_SRC_OFF     0x378U  /* Single Src Transaction Request     */
-#define DMAC_SGLREQ_DST_OFF     0x380U  /* Single Dst Transaction Request     */
-#define DMAC_LST_SRC_OFF        0x388U  /* Last Src Transaction Request       */
-#define DMAC_LST_DST_OFF        0x390U  /* Last Dst Transaction Request       */
-/* DMAC Global Control */
-#define DMAC_CFG_REG_OFF        0x398U  /* DMAC Enable Register               */
-#define DMAC_CH_EN_OFF          0x3A0U  /* Channel Enable Register            */
-#define DMAC_ID_OFF             0x3A8U  /* DMAC Component ID (RO)             */
-#define DMAC_TEST_OFF           0x3B0U  /* DMAC Test Register                 */
+#define DMAC_STATUS_INT_OFF     0x360U
+#define DMAC_REQ_SRC_OFF        0x368U
+#define DMAC_REQ_DST_OFF        0x370U
+#define DMAC_SGLREQ_SRC_OFF     0x378U
+#define DMAC_SGLREQ_DST_OFF     0x380U
+#define DMAC_LST_SRC_OFF        0x388U
+#define DMAC_LST_DST_OFF        0x390U
+#define DMAC_CFG_REG_OFF        0x398U
+#define DMAC_CH_EN_OFF          0x3A0U
+#define DMAC_ID_OFF             0x3A8U
 
 /* Global register address macros */
 #define DMAC_RAW_TFR        (DMAC_BASE + DMAC_RAW_TFR_OFF)
@@ -128,297 +142,294 @@
 /* ===========================================================================
  * CTL Register (64-bit, offset 0x18)
  *
- *  [63:45] rsv
- *  [44]    DONE          – set bởi HW khi block transfer kết thúc
- *  [43:32] BLOCK_TS      – 12 bits, số data items trong block
- *  [31:29] rsv
- *  [28]    LLP_SRC_EN    – enable load SAR từ LLI
- *  [27]    LLP_DEST_EN   – enable load DAR từ LLI
- *  [26:25] SMS           – Source Master Select (0=M1, 1=M2)
- *  [24:23] DMS           – Destination Master Select
- *  [22:20] TT_FC         – Transfer Type & Flow Control
- *  [19]    rsv
- *  [18]    DST_SCATTER_EN
- *  [17]    SRC_GATHER_EN
- *  [16:14] SRC_MSIZE     – Source Burst Transaction Length
- *  [13:11] DEST_MSIZE    – Destination Burst Transaction Length
- *  [10:9]  SINC          – Source Address Increment
- *  [8:7]   DINC          – Destination Address Increment
- *  [6:4]   SRC_TR_WIDTH  – Source Transfer Width
- *  [3:1]   DST_TR_WIDTH  – Destination Transfer Width
- *  [0]     INT_EN        – Interrupt Enable
+ * Bits [31:0]  -- low word (viết vào offset +0x18)
+ * Bits [63:32] -- high word (viết vào offset +0x1C)
+ *
+ *  [63:45]  rsv
+ *  [44]     DONE          – HW set khi block kết thúc
+ *  [43:32]  BLOCK_TS      – số data-item trong một block (12-bit)
+ *  [31:29]  rsv
+ *  [28]     LLP_SRC_EN    – reload SAR từ LLI
+ *  [27]     LLP_DEST_EN   – reload DAR từ LLI
+ *  [26:25]  SMS           – Source Master Select (0=M1, 1=M2)
+ *  [24:23]  DMS           – Dest Master Select
+ *  [22:20]  TT_FC         – Transfer Type & Flow Control
+ *  [19]     rsv
+ *  [18]     DST_SCATTER_EN
+ *  [17]     SRC_GATHER_EN
+ *  [16:14]  SRC_MSIZE     – Source burst length
+ *  [13:11]  DEST_MSIZE    – Dest burst length
+ *  [10:9]   SINC          – Source address increment
+ *  [8:7]    DINC          – Dest address increment
+ *  [6:4]    SRC_TR_WIDTH  – Source transfer width
+ *  [3:1]    DST_TR_WIDTH  – Dest transfer width
+ *  [0]      INT_EN
  * =========================================================================*/
-#define CTL_INT_EN              (1ULL <<  0)
 
-#define CTL_DST_TR_WIDTH_SHIFT  1
-#define CTL_DST_TR_WIDTH_MASK   (0x7ULL <<  1)
+/* --- Bit positions trong 64-bit CTL --- */
+#define CTL_INT_EN_POS          0U
+#define CTL_DST_TR_WIDTH_POS    1U
+#define CTL_SRC_TR_WIDTH_POS    4U
+#define CTL_DINC_POS            7U
+#define CTL_SINC_POS            9U
+#define CTL_DEST_MSIZE_POS      11U
+#define CTL_SRC_MSIZE_POS       14U
+#define CTL_SRC_GATHER_EN_POS   17U
+#define CTL_DST_SCATTER_EN_POS  18U
+#define CTL_TT_FC_POS           20U
+#define CTL_DMS_POS             23U
+#define CTL_SMS_POS             25U
+#define CTL_LLP_DEST_EN_POS     27U
+#define CTL_LLP_SRC_EN_POS      28U
+#define CTL_BLOCK_TS_POS        32U   /* [43:32] */
+#define CTL_DONE_POS            44U
 
-#define CTL_SRC_TR_WIDTH_SHIFT  4
-#define CTL_SRC_TR_WIDTH_MASK   (0x7ULL <<  4)
+/* --- Masks --- */
+#define CTL_BLOCK_TS_MASK       0xFFFU   /* 12 bits */
 
-#define CTL_DINC_SHIFT          7
-#define CTL_DINC_MASK           (0x3ULL <<  7)
-
-#define CTL_SINC_SHIFT          9
-#define CTL_SINC_MASK           (0x3ULL <<  9)
-
-#define CTL_DEST_MSIZE_SHIFT    11
-#define CTL_DEST_MSIZE_MASK     (0x7ULL << 11)
-
-#define CTL_SRC_MSIZE_SHIFT     14
-#define CTL_SRC_MSIZE_MASK      (0x7ULL << 14)
-
-#define CTL_SRC_GATHER_EN       (1ULL << 17)
-#define CTL_DST_SCATTER_EN      (1ULL << 18)
-
-#define CTL_TT_FC_SHIFT         20
-#define CTL_TT_FC_MASK          (0x7ULL << 20)
-
-#define CTL_DMS_SHIFT           23
-#define CTL_DMS_MASK            (0x3ULL << 23)
-
-#define CTL_SMS_SHIFT           25
-#define CTL_SMS_MASK            (0x3ULL << 25)
-
-#define CTL_LLP_DEST_EN         (1ULL << 27)
-#define CTL_LLP_SRC_EN          (1ULL << 28)
-
-#define CTL_BLOCK_TS_SHIFT      32
-#define CTL_BLOCK_TS_MASK       (0xFFFULL << 32)  /* bits [43:32] */
-
-#define CTL_DONE                (1ULL << 44)
-
-/* --- Transfer Width --- */
+/* --- Transfer Width values --- */
 #define TR_WIDTH_8              0U
 #define TR_WIDTH_16             1U
 #define TR_WIDTH_32             2U
 #define TR_WIDTH_64             3U
 
-/* --- Address Increment --- */
-#define ADDR_INC                0U   /* Increment   */
-#define ADDR_DEC                1U   /* Decrement   */
-#define ADDR_NOCHANGE           2U   /* No change   */
+/* --- Address Increment values --- */
+#define ADDR_INC                0U
+#define ADDR_DEC                1U
+#define ADDR_NOCHANGE           2U
 
-/* --- Burst size (MSIZE) --- */
+/* --- Burst size (MSIZE) values --- */
 #define MSIZE_1                 0U
 #define MSIZE_4                 1U
 #define MSIZE_8                 2U
 #define MSIZE_16                3U
 #define MSIZE_32                4U
 
-/* --- Transfer Type & Flow Control --- */
-#define TT_FC_M2M_DMA           0U   /* MEM→MEM,    DMA ctrl   */
-#define TT_FC_M2P_DMA           1U   /* MEM→Periph, DMA ctrl   */
-#define TT_FC_P2M_DMA           2U   /* Periph→MEM, DMA ctrl   */
-#define TT_FC_P2P_DMA           3U   /* Periph→Periph, DMA ctrl*/
-#define TT_FC_P2M_PERIPH        4U   /* Periph→MEM, Peri ctrl  */
-#define TT_FC_M2P_PERIPH        6U   /* MEM→Periph, Peri ctrl  */
+/* Lookup: MSIZE enum → actual item count */
+static const uint32_t g_msize_items[8] = {1U,4U,8U,16U,32U,64U,128U,256U};
 
-/* --- Master Select --- */
+/* --- Transfer Type & Flow Control values --- */
+#define TT_FC_M2M_DMA           0U
+#define TT_FC_M2P_DMA           1U
+#define TT_FC_P2M_DMA           2U
+#define TT_FC_P2P_DMA           3U
+#define TT_FC_P2M_PERIPH        4U
+#define TT_FC_M2P_PERIPH        6U
+
+/* --- Master Select values --- */
 #define MASTER_1                0U
 #define MASTER_2                1U
 
 /**
- * @brief Tạo giá trị thanh ghi CTL 64-bit
+ * @brief Tạo giá trị CTL_LO (bits [31:0])
  */
-static inline uint64_t ctl_make(uint32_t int_en,
-                                uint32_t dst_tr_w, uint32_t src_tr_w,
-                                uint32_t dinc,     uint32_t sinc,
-                                uint32_t dst_ms,   uint32_t src_ms,
-                                uint32_t tt_fc,
-                                uint32_t dms,      uint32_t sms,
-                                int      llp_dst,  int      llp_src,
-                                uint32_t block_ts)
+static inline uint32_t ctl_lo_make(uint32_t int_en,
+                                   uint32_t dst_tr_w, uint32_t src_tr_w,
+                                   uint32_t dinc,     uint32_t sinc,
+                                   uint32_t dst_ms,   uint32_t src_ms,
+                                   uint32_t tt_fc,
+                                   uint32_t dms,      uint32_t sms,
+                                   int      llp_dst,  int      llp_src)
 {
-    uint64_t v = 0;
-    v |= (uint64_t)(int_en  & 0x1U);
-    v |= (uint64_t)(dst_tr_w & 0x7U) << CTL_DST_TR_WIDTH_SHIFT;
-    v |= (uint64_t)(src_tr_w & 0x7U) << CTL_SRC_TR_WIDTH_SHIFT;
-    v |= (uint64_t)(dinc     & 0x3U) << CTL_DINC_SHIFT;
-    v |= (uint64_t)(sinc     & 0x3U) << CTL_SINC_SHIFT;
-    v |= (uint64_t)(dst_ms   & 0x7U) << CTL_DEST_MSIZE_SHIFT;
-    v |= (uint64_t)(src_ms   & 0x7U) << CTL_SRC_MSIZE_SHIFT;
-    v |= (uint64_t)(tt_fc    & 0x7U) << CTL_TT_FC_SHIFT;
-    v |= (uint64_t)(dms      & 0x3U) << CTL_DMS_SHIFT;
-    v |= (uint64_t)(sms      & 0x3U) << CTL_SMS_SHIFT;
-    if (llp_dst) v |= CTL_LLP_DEST_EN;
-    if (llp_src) v |= CTL_LLP_SRC_EN;
-    v |= (uint64_t)(block_ts & 0xFFFU) << CTL_BLOCK_TS_SHIFT;
+    uint32_t v = 0;
+    v |= (int_en   & 0x1U);
+    v |= (dst_tr_w & 0x7U) << CTL_DST_TR_WIDTH_POS;
+    v |= (src_tr_w & 0x7U) << CTL_SRC_TR_WIDTH_POS;
+    v |= (dinc     & 0x3U) << CTL_DINC_POS;
+    v |= (sinc     & 0x3U) << CTL_SINC_POS;
+    v |= (dst_ms   & 0x7U) << CTL_DEST_MSIZE_POS;
+    v |= (src_ms   & 0x7U) << CTL_SRC_MSIZE_POS;
+    v |= (tt_fc    & 0x7U) << CTL_TT_FC_POS;
+    v |= (dms      & 0x3U) << CTL_DMS_POS;
+    v |= (sms      & 0x3U) << CTL_SMS_POS;
+    if (llp_dst) v |= (1U << CTL_LLP_DEST_EN_POS);
+    if (llp_src) v |= (1U << CTL_LLP_SRC_EN_POS);
     return v;
+}
+
+/**
+ * @brief Tạo giá trị CTL_HI (bits [63:32])
+ *        Chứa BLOCK_TS tại bits [43:32] → tức là bits [11:0] của high-word
+ */
+static inline uint32_t ctl_hi_make(uint32_t block_ts)
+{
+    return (block_ts & CTL_BLOCK_TS_MASK);   /* bits [11:0] of high word = [43:32] total */
 }
 
 /* ===========================================================================
  * CFG Register (64-bit, offset 0x40)
  *
- *  [63:47] rsv
- *  [46:43] DEST_PER     – Dst HW Handshake Interface (4 bits)
- *  [42:39] SRC_PER      – Src HW Handshake Interface (4 bits)
- *  [38]    SS_UPD_EN    – Source Status Update Enable
- *  [37]    DS_UPD_EN    – Destination Status Update Enable
- *  [36:34] PROTCTL      – AHB HPROT[3:1]
- *  [33]    FIFO_MODE    – 0=space/data available, 1=use full FIFO
- *  [32]    FCMODE       – Flow Control Mode
- *  [31]    RELOAD_DST   – Auto-reload DAR cho multi-block
- *  [30]    RELOAD_SRC   – Auto-reload SAR cho multi-block
- *  [29:20] MAX_ABRST    – Max AMBA Burst Length (0=no limit)
- *  [19]    SRC_HS_POL   – Src Handshake Polarity (0=active high)
- *  [18]    DST_HS_POL   – Dst Handshake Polarity (0=active high)
- *  [17]    LOCK_B
- *  [16]    LOCK_CH
- *  [15:14] LOCK_B_L
- *  [13:12] LOCK_CH_L
- *  [11]    HS_SEL_SRC   – 1=SW handshake, 0=HW handshake
- *  [10]    HS_SEL_DST   – 1=SW handshake, 0=HW handshake
- *  [9]     FIFO_EMPTY   – RO: FIFO empty flag
- *  [8]     CH_SUSP      – Channel Suspend
- *  [7:5]   CH_PRIOR     – Channel Priority (0=thấp nhất, 7=cao nhất)
- *  [4:0]   rsv
+ * Bits [31:0]  -- low word (viết vào offset +0x40)
+ * Bits [63:32] -- high word (viết vào offset +0x44)
+ *
+ *  [63:47]  rsv
+ *  [46:43]  DEST_PER     – Dst HW HS interface number (4-bit)
+ *  [42:39]  SRC_PER      – Src HW HS interface number (4-bit)
+ *  [38]     SS_UPD_EN
+ *  [37]     DS_UPD_EN
+ *  [36:34]  PROTCTL
+ *  [33]     FIFO_MODE
+ *  [32]     FCMODE
+ *  [31]     RELOAD_DST
+ *  [30]     RELOAD_SRC
+ *  [29:20]  MAX_ABRST    – Max AMBA burst (0 = no limit)
+ *  [19]     SRC_HS_POL   – 0 = active high
+ *  [18]     DST_HS_POL   – 0 = active high
+ *  [17]     LOCK_B
+ *  [16]     LOCK_CH
+ *  [15:14]  LOCK_B_L
+ *  [13:12]  LOCK_CH_L
+ *  [11]     HS_SEL_SRC   – 1 = SW handshake
+ *  [10]     HS_SEL_DST   – 1 = SW handshake
+ *  [9]      FIFO_EMPTY   – RO
+ *  [8]      CH_SUSP
+ *  [7:5]    CH_PRIOR
+ *  [4:0]    rsv
  * =========================================================================*/
-#define CFG_CH_PRIOR_SHIFT      5
-#define CFG_CH_PRIOR_MASK       (0x7ULL <<  5)
 
-#define CFG_CH_SUSP             (1ULL <<  8)
-#define CFG_FIFO_EMPTY          (1ULL <<  9)   /* RO */
-#define CFG_HS_SEL_DST          (1ULL << 10)   /* 1 = SW HS dst */
-#define CFG_HS_SEL_SRC          (1ULL << 11)   /* 1 = SW HS src */
+/* Bit positions trong 64-bit CFG */
+#define CFG_CH_PRIOR_POS        5U
+#define CFG_CH_SUSP_POS         8U
+#define CFG_FIFO_EMPTY_POS      9U
+#define CFG_HS_SEL_DST_POS      10U
+#define CFG_HS_SEL_SRC_POS      11U
+#define CFG_LOCK_CH_L_POS       12U
+#define CFG_LOCK_B_L_POS        14U
+#define CFG_LOCK_CH_POS         16U
+#define CFG_LOCK_B_POS          17U
+#define CFG_DST_HS_POL_POS      18U
+#define CFG_SRC_HS_POL_POS      19U
+#define CFG_MAX_ABRST_POS       20U
+#define CFG_RELOAD_SRC_POS      30U
+#define CFG_RELOAD_DST_POS      31U
+/* High word positions (relative to full 64-bit) */
+#define CFG_FCMODE_POS          32U
+#define CFG_FIFO_MODE_POS       33U
+#define CFG_PROTCTL_POS         34U
+#define CFG_DS_UPD_EN_POS       37U
+#define CFG_SS_UPD_EN_POS       38U
+#define CFG_SRC_PER_POS         39U   /* [42:39] */
+#define CFG_DEST_PER_POS        43U   /* [46:43] */
 
-#define CFG_LOCK_CH_L_SHIFT     12
-#define CFG_LOCK_CH_L_MASK      (0x3ULL << 12)
-#define CFG_LOCK_B_L_SHIFT      14
-#define CFG_LOCK_B_L_MASK       (0x3ULL << 14)
-
-#define CFG_LOCK_CH             (1ULL << 16)
-#define CFG_LOCK_B              (1ULL << 17)
-
-#define CFG_DST_HS_POL          (1ULL << 18)   /* 0 = active high */
-#define CFG_SRC_HS_POL          (1ULL << 19)   /* 0 = active high */
-
-#define CFG_MAX_ABRST_SHIFT     20
-#define CFG_MAX_ABRST_MASK      (0x3FFULL << 20)
-
-#define CFG_RELOAD_SRC          (1ULL << 30)
-#define CFG_RELOAD_DST          (1ULL << 31)
-
-#define CFG_FCMODE              (1ULL << 32)
-#define CFG_FIFO_MODE           (1ULL << 33)
-
-#define CFG_PROTCTL_SHIFT       34
-#define CFG_PROTCTL_MASK        (0x7ULL << 34)
-
-#define CFG_DS_UPD_EN           (1ULL << 37)
-#define CFG_SS_UPD_EN           (1ULL << 38)
-
-#define CFG_SRC_PER_SHIFT       39             /* bits [42:39] */
-#define CFG_SRC_PER_MASK        (0xFULL << 39)
-
-#define CFG_DEST_PER_SHIFT      43             /* bits [46:43] */
-#define CFG_DEST_PER_MASK       (0xFULL << 43)
+/* Bit masks để đọc CFG_HI */
+#define CFG_CH_SUSP_BIT         (1U << (CFG_CH_SUSP_POS))
+#define CFG_FIFO_EMPTY_BIT      (1U << (CFG_FIFO_EMPTY_POS))
+#define CFG_HS_SEL_DST_BIT      (1U << (CFG_HS_SEL_DST_POS))
+#define CFG_HS_SEL_SRC_BIT      (1U << (CFG_HS_SEL_SRC_POS))
+#define CFG_RELOAD_SRC_BIT      (1U << (CFG_RELOAD_SRC_POS))
+#define CFG_RELOAD_DST_BIT      (1U << (CFG_RELOAD_DST_POS))
 
 /**
- * @brief Tạo giá trị thanh ghi CFG 64-bit
+ * @brief Tạo giá trị CFG_LO (bits [31:0])
  */
-static inline uint64_t cfg_make(uint32_t priority,
-                                int      sw_hs_dst, int sw_hs_src,
-                                int      fifo_mode,
-                                int      reload_src, int reload_dst,
-                                uint32_t src_per,    uint32_t dst_per)
+static inline uint32_t cfg_lo_make(uint32_t priority,
+                                   int      sw_hs_dst, int sw_hs_src,
+                                   int      reload_src, int reload_dst)
 {
-    uint64_t v = 0;
-    v |= (uint64_t)(priority & 0x7U) << CFG_CH_PRIOR_SHIFT;
-    if (sw_hs_dst)   v |= CFG_HS_SEL_DST;
-    if (sw_hs_src)   v |= CFG_HS_SEL_SRC;
-    if (fifo_mode)   v |= CFG_FIFO_MODE;
-    if (reload_src)  v |= CFG_RELOAD_SRC;
-    if (reload_dst)  v |= CFG_RELOAD_DST;
-    v |= (uint64_t)(src_per & 0xFU) << CFG_SRC_PER_SHIFT;
-    v |= (uint64_t)(dst_per & 0xFU) << CFG_DEST_PER_SHIFT;
+    uint32_t v = 0;
+    v |= (priority & 0x7U) << CFG_CH_PRIOR_POS;
+    if (sw_hs_dst)  v |= (1U << CFG_HS_SEL_DST_POS);
+    if (sw_hs_src)  v |= (1U << CFG_HS_SEL_SRC_POS);
+    if (reload_src) v |= (1U << CFG_RELOAD_SRC_POS);
+    if (reload_dst) v |= (1U << CFG_RELOAD_DST_POS);
+    return v;
+}
+
+/**
+ * @brief Tạo giá trị CFG_HI (bits [63:32])
+ *        Các field ở đây đều tính relative đến high-word (tức offset - 32)
+ */
+static inline uint32_t cfg_hi_make(int      fifo_mode,
+                                   uint32_t src_per, uint32_t dst_per)
+{
+    uint32_t v = 0;
+    if (fifo_mode) v |= (1U << (CFG_FIFO_MODE_POS - 32U));  /* bit 1 of high word */
+    v |= ((src_per & 0xFU) << (CFG_SRC_PER_POS  - 32U));   /* bits [10:7]        */
+    v |= ((dst_per & 0xFU) << (CFG_DEST_PER_POS - 32U));   /* bits [14:11]       */
     return v;
 }
 
 /* ===========================================================================
  * Software Handshaking Registers  (32-bit)
  *
- * Format tất cả SW-HS registers:
- *   bits[15:8] = Write-Enable (WE) – phải set tương ứng mới được ghi
- *   bits[7:0]  = Request / Last flag
+ *  bits[15:8] = Write-Enable (WE)
+ *  bits[7:0]  = Request / Last flag
  *
- *  Để SET:   ghi (WE_ch | REQ_ch)
- *  Để CLEAR: ghi (WE_ch | 0)
+ *  SET:   ghi (WE | REQ) → DMAC nhận request, tự clear REQ sau khi xử lý
+ *  CLEAR: ghi (WE | 0)   → xoá request (ít khi dùng)
  * =========================================================================*/
-#define SWHS_REQ_BIT(ch)    (1U        << (ch))
-#define SWHS_WE_BIT(ch)     (1U        << ((ch) + 8U))
-#define SWHS_SET(ch)        (SWHS_WE_BIT(ch) | SWHS_REQ_BIT(ch))
-#define SWHS_CLR(ch)        (SWHS_WE_BIT(ch))
+#define SWHS_REQ_BIT(ch)        (1U << (ch))
+#define SWHS_WE_BIT(ch)         (1U << ((ch) + 8U))
+#define SWHS_SET(ch)            (SWHS_WE_BIT(ch) | SWHS_REQ_BIT(ch))
+#define SWHS_CLR(ch)            (SWHS_WE_BIT(ch))
 
 /* ===========================================================================
- * ChEnReg (32-bit)
- *   bits[15:8] = Write-Enable
- *   bits[7:0]  = Channel Enable
+ * ChEnReg (32-bit)  –  bits[15:8]=WE, bits[7:0]=CH_EN
  * =========================================================================*/
-#define CH_EN_BIT(ch)       (1U << (ch))
-#define CH_EN_WE(ch)        (1U << ((ch) + 8U))
-#define CH_EN_SET(ch)       (CH_EN_WE(ch) | CH_EN_BIT(ch))
-#define CH_EN_CLR(ch)       (CH_EN_WE(ch))
+#define CH_EN_BIT(ch)           (1U << (ch))
+#define CH_EN_WE(ch)            (1U << ((ch) + 8U))
+#define CH_EN_SET(ch)           (CH_EN_WE(ch) | CH_EN_BIT(ch))
+#define CH_EN_CLR(ch)           (CH_EN_WE(ch))
 
 /* ===========================================================================
- * DmaCfgReg bits
+ * DmaCfgReg
  * =========================================================================*/
-#define DMAC_EN             (1U << 0)
+#define DMAC_EN                 (1U << 0)
 
 /* ===========================================================================
- * StatusInt bits (DMAC_STATUS_INT)
+ * StatusInt bits
  * =========================================================================*/
-#define INT_TFR             (1U << 0)
-#define INT_BLOCK           (1U << 1)
-#define INT_SRCTRAN         (1U << 2)
-#define INT_DSTTRAN         (1U << 3)
-#define INT_ERR             (1U << 4)
+#define INT_TFR                 (1U << 0)
+#define INT_BLOCK               (1U << 1)
+#define INT_SRCTRAN             (1U << 2)
+#define INT_DSTTRAN             (1U << 3)
+#define INT_ERR                 (1U << 4)
 
-/* Interrupt mask/clear helper (cùng format WE như SW-HS) */
-#define INT_MASK_SET(ch)    (SWHS_WE_BIT(ch) | SWHS_REQ_BIT(ch))
-#define INT_MASK_CLR(ch)    (SWHS_WE_BIT(ch))
+/* Interrupt MASK register: same WE format as SW-HS
+ *   SET = unmask (enable) interrupt for channel ch
+ *   CLR = mask (disable) interrupt for channel ch       */
+#define INT_MASK_SET(ch)        (SWHS_WE_BIT(ch) | SWHS_REQ_BIT(ch))
+#define INT_MASK_CLR(ch)        (SWHS_WE_BIT(ch))
 
 /* ===========================================================================
  * Register Access Primitives
  * =========================================================================*/
-#define REG32(addr)         (*((volatile uint32_t *)(uintptr_t)(addr)))
-#define REG_WR32(addr, v)   (REG32(addr) = (uint32_t)(v))
-#define REG_RD32(addr)      (REG32(addr))
-
-/* 64-bit via hai lần 32-bit, little-endian */
-static inline void reg_wr64(uint32_t base, uint64_t val)
-{
-    REG_WR32(base,      (uint32_t)(val         & 0xFFFFFFFFULL));
-    REG_WR32(base + 4U, (uint32_t)((val >> 32) & 0xFFFFFFFFULL));
-}
-
-static inline uint64_t reg_rd64(uint32_t base)
-{
-    uint64_t lo = (uint64_t)REG_RD32(base);
-    uint64_t hi = (uint64_t)REG_RD32(base + 4U);
-    return lo | (hi << 32);
-}
-
-#define REG_WR64(addr, v)   reg_wr64((uint32_t)(addr), (uint64_t)(v))
-#define REG_RD64(addr)      reg_rd64((uint32_t)(addr))
+#define REG32(addr)             (*((volatile uint32_t *)(uintptr_t)(addr)))
+#define REG_WR32(addr, v)       (REG32(addr) = (uint32_t)(v))
+#define REG_RD32(addr)          (REG32(addr))
 
 /* ===========================================================================
- * LLI (Linked List Item) structure  —  align 4 bytes
+ * LLI (Linked List Item) – memory layout khớp DMAC hardware
  *
- * Thứ tự field đúng theo DW_ahb_dmac databook:
- *   SAR (32), DAR (32), LLP (32), [pad 32], CTL (64), SSTAT (32), DSTAT (32)
+ * QUAN TRỌNG: CTL phải nằm tại offset +12 (ngay sau LLP),
+ * không được để compiler thêm padding. Dùng packed struct.
+ *
+ *  Offset  Field    Size
+ *   +00    sar      4
+ *   +04    dar      4
+ *   +08    llp      4
+ *   +12    ctl_lo   4   ← bits [31:0]  của CTL
+ *   +16    ctl_hi   4   ← bits [63:32] của CTL
+ *   +20    sstat    4
+ *   +24    dstat    4
+ *   Total: 28 bytes
  * =========================================================================*/
-typedef struct __attribute__((aligned(4))) {
-    uint32_t sar;       /* Source address                              */
-    uint32_t dar;       /* Destination address                         */
-    uint32_t llp;       /* Next LLI address [31:2], LMS[1:0]           */
-    uint32_t _rsv;      /* Reserved / alignment pad                    */
-    uint64_t ctl;       /* CTL register value cho block này            */
-    uint32_t sstat;     /* Source status (dùng nếu SS_UPD_EN)          */
-    uint32_t dstat;     /* Destination status (dùng nếu DS_UPD_EN)     */
+typedef struct __attribute__((packed)) {
+    uint32_t sar;       /* Source Address                              */
+    uint32_t dar;       /* Destination Address                         */
+    uint32_t llp;       /* Next LLI pointer [31:2], LMS[1:0]           */
+    uint32_t ctl_lo;    /* CTL bits [31:0]                             */
+    uint32_t ctl_hi;    /* CTL bits [63:32]  (BLOCK_TS ở [11:0] đây)  */
+    uint32_t sstat;     /* Source Status                               */
+    uint32_t dstat;     /* Destination Status                          */
 } dmac_lli_t;
 
-/* Tạo giá trị LLP register: addr phải align 4, lms = master select bits */
+/* Compile-time check kích thước LLI */
+typedef char _lli_size_check[(sizeof(dmac_lli_t) == 28U) ? 1 : -1];
+
+/* Tạo giá trị LLP register:
+ *   addr  = địa chỉ LLI kế tiếp (phải align 4)
+ *   lms   = master select của bus chứa LLI (thường = MASTER_1)   */
 #define LLP_MAKE(addr, lms) \
     (((uint32_t)(uintptr_t)(addr) & 0xFFFFFFFCU) | ((uint32_t)(lms) & 0x3U))
 
