@@ -1,0 +1,750 @@
+/**
+ * @file  dw_ahb_dmac_test_aes.c
+ * @brief DW_ahb_dmac v2.24a – AES DMA Single-Block Test
+ *
+ * Sử dụng đúng register map AES từ tài liệu:
+ *   Base address : 0x62000000
+ *   AES_DATA     : base + 0x10000  (TX write / RX read, FIFO-mapped)
+ *
+ * Kịch bản test (single-block ECB-128):
+ *   Phase A – M2P:  DMA ghi 4 words plaintext vào AES TX FIFO
+ *   Phase B – P2M:  DMA đọc 4 words ciphertext từ AES RX FIFO
+ *
+ * SW-HS được dùng cho cả hai chiều vì AES không nhất thiết phải
+ * có HW-HS riêng; driver trigger DMA bằng cách check AES_STAT
+ * rồi gửi SW burst/single request thủ công.
+ *
+ * Yêu cầu:
+ *   - dw_ahb_dmac_regs.h  (header từ project gốc)
+ *   - Cùng pattern init/enable như test suite gốc
+ *
+ * Biên dịch độc lập (ví dụ để review):
+ *   gcc -DDMAC_BASE=0x70000000 -c dw_ahb_dmac_test_aes.c
+ */
+
+#include <stdint.h>
+#include <stdio.h>
+#include "dw_ahb_dmac_regs.h"
+
+/* ===========================================================================
+ * AES Register Map  (từ tài liệu)
+ * =========================================================================*/
+#ifndef AES_BASE
+#define AES_BASE            0x62000000UL
+#endif
+
+/* ---------- Offsets ---------- */
+#define AES_CONF_OFF        0x0004U   /* Configuration register            */
+#define AES_DMA_OFF         0x0008U   /* DMA control register              */
+#define AES_INTE_OFF        0x000CU   /* Interrupt enable register         */
+#define AES_STAT_OFF        0x0010U   /* Status register                   */
+#define AES_SWRS_OFF        0x0044U   /* Software reset register           */
+#define AES_ENAB_OFF        0x0048U   /* Enable register                   */
+#define AES_DATA_OFF        0x10000U  /* Data FIFO (TX write / RX read)    */
+
+/* Key: AES_KxLR = 0x14+0x8*x, AES_KxRR = 0x18+0x8*x  (x=0..3) */
+#define AES_K0LR_OFF        0x0014U
+#define AES_K0RR_OFF        0x0018U
+#define AES_K1LR_OFF        0x001CU
+#define AES_K1RR_OFF        0x0020U
+#define AES_K2LR_OFF        0x0024U
+#define AES_K2RR_OFF        0x0028U
+#define AES_K3LR_OFF        0x002CU
+#define AES_K3RR_OFF        0x0030U
+
+/* IV: AES_IVxL = 0x34+0x8*x, AES_IVxR = 0x38+0x8*x  (x=0..1) */
+#define AES_IV0L_OFF        0x0034U
+#define AES_IV0R_OFF        0x0038U
+#define AES_IV1L_OFF        0x003CU
+#define AES_IV1R_OFF        0x0040U
+
+/* ---------- Absolute addresses ---------- */
+#define AES_CONF            (AES_BASE + AES_CONF_OFF)
+#define AES_DMA             (AES_BASE + AES_DMA_OFF)
+#define AES_INTE            (AES_BASE + AES_INTE_OFF)
+#define AES_STAT            (AES_BASE + AES_STAT_OFF)
+#define AES_SWRS            (AES_BASE + AES_SWRS_OFF)
+#define AES_ENAB            (AES_BASE + AES_ENAB_OFF)
+#define AES_DATA            (AES_BASE + AES_DATA_OFF)
+
+#define AES_K0LR            (AES_BASE + AES_K0LR_OFF)
+#define AES_K0RR            (AES_BASE + AES_K0RR_OFF)
+#define AES_K1LR            (AES_BASE + AES_K1LR_OFF)
+#define AES_K1RR            (AES_BASE + AES_K1RR_OFF)
+#define AES_K2LR            (AES_BASE + AES_K2LR_OFF)
+#define AES_K2RR            (AES_BASE + AES_K2RR_OFF)
+#define AES_K3LR            (AES_BASE + AES_K3LR_OFF)
+#define AES_K3RR            (AES_BASE + AES_K3RR_OFF)
+
+#define AES_IV0L            (AES_BASE + AES_IV0L_OFF)
+#define AES_IV0R            (AES_BASE + AES_IV0R_OFF)
+#define AES_IV1L            (AES_BASE + AES_IV1L_OFF)
+#define AES_IV1R            (AES_BASE + AES_IV1R_OFF)
+
+/* ---------- AES_CONF bit fields ---------- */
+/*  [9:8] key_size:   0x=256, 10=192, 11=128                              */
+/*  [7:6] data_type:  00=no swap, 01=16-bit swap, 1x=8-bit swap           */
+/*  [5:3] mode:       000=ECB, 001=CBC, 010=CTR, 011=GCM,                 */
+/*                    100=XTS, 101=CCM, 110=CFB, 111=OFB                   */
+/*  [2]   dir:        0=encrypt, 1=decrypt                                 */
+/*  [0]   resume                                                           */
+#define AES_CONF_KEY128     (0x3U << 8)   /* key_size=11 → 128-bit         */
+#define AES_CONF_KEY192     (0x2U << 8)   /* key_size=10 → 192-bit         */
+#define AES_CONF_KEY256     (0x0U << 8)   /* key_size=0x → 256-bit         */
+#define AES_CONF_DTYPE_NONE (0x0U << 6)   /* no swapping                   */
+#define AES_CONF_DTYPE_HW   (0x1U << 6)   /* 16-bit half-word swap         */
+#define AES_CONF_DTYPE_BYTE (0x2U << 6)   /* 8-bit byte swap               */
+#define AES_CONF_MODE_ECB   (0x0U << 3)
+#define AES_CONF_MODE_CBC   (0x1U << 3)
+#define AES_CONF_MODE_CTR   (0x2U << 3)
+#define AES_CONF_MODE_GCM   (0x3U << 3)
+#define AES_CONF_DIR_ENC    (0x0U << 2)   /* encrypt                       */
+#define AES_CONF_DIR_DEC    (0x1U << 2)   /* decrypt                       */
+
+/* ---------- AES_DMA bit fields ---------- */
+#define AES_DMA_RXEN        (1U << 17)    /* DMA RX enable                 */
+#define AES_DMA_TXEN        (1U << 16)    /* DMA TX enable                 */
+#define AES_DMA_RXDL_POS    8U            /* RXDL[15:8] – RX FIFO level    */
+#define AES_DMA_TXDL_POS    0U            /* TXDL[7:0]  – TX FIFO level    */
+
+/* ---------- AES_STAT bit fields ---------- */
+#define AES_STAT_BUSY       (1U << 6)     /* AES engine busy               */
+#define AES_STAT_RXFU       (1U << 5)     /* RX FIFO full                  */
+#define AES_STAT_RXNE       (1U << 4)     /* RX FIFO not empty             */
+#define AES_STAT_TXNF       (1U << 3)     /* TX FIFO not full              */
+#define AES_STAT_TXEM       (1U << 2)     /* TX FIFO empty                 */
+/* bit1: RXUF underflow (R/W1C), bit0: TXOF overflow (R/W1C)             */
+#define AES_STAT_RXUF       (1U << 1)
+#define AES_STAT_TXOF       (1U << 0)
+
+/* ---------- AES_SWRS bit fields ---------- */
+#define AES_SWRS_RFR        (1U << 2)     /* RX FIFO reset (auto-clears)   */
+#define AES_SWRS_TFR        (1U << 1)     /* TX FIFO reset (auto-clears)   */
+#define AES_SWRS_SCR        (1U << 0)     /* AES core + both FIFOs reset   */
+
+/* ---------- AES_ENAB bit fields ---------- */
+#define AES_ENAB_EN         (1U << 0)     /* AES global enable             */
+
+/* ===========================================================================
+ * HW Handshake interface numbers – chỉnh theo SoC
+ * =========================================================================*/
+#ifndef HWHS_AES_TX
+#define HWHS_AES_TX         0U            /* DMA src-HS cho AES TX (M2P)   */
+#endif
+#ifndef HWHS_AES_RX
+#define HWHS_AES_RX         1U            /* DMA dst-HS cho AES RX (P2M)   */
+#endif
+
+/* ===========================================================================
+ * Test parameters
+ * =========================================================================*/
+#define AES_WORDS           4U            /* 1 block AES-128 = 128 bit = 4 x 32 bit */
+#define TIMEOUT             1000000U
+
+/* ===========================================================================
+ * Error codes (tái sử dụng từ test suite gốc)
+ * =========================================================================*/
+typedef enum {
+    DMAC_OK          = 0,
+    DMAC_ERR_TIMEOUT = 1,
+    DMAC_ERR_HW      = 2,
+    DMAC_ERR_DATA    = 3,
+    DMAC_ERR_REG     = 4,
+} dmac_err_t;
+
+/* ===========================================================================
+ * Buffers (align 4)
+ * =========================================================================*/
+static uint32_t aes_plain [AES_WORDS] __attribute__((aligned(4)));
+static uint32_t aes_cipher[AES_WORDS] __attribute__((aligned(4)));
+
+/* ===========================================================================
+ * Helpers – polling
+ * =========================================================================*/
+
+/** Đợi AES_STAT.BUSY = 0 */
+static dmac_err_t aes_wait_idle(void)
+{
+    uint32_t t = TIMEOUT;
+    while (REG_RD32(AES_STAT) & AES_STAT_BUSY) {
+        if (--t == 0) {
+            printf("  [ERR] AES wait-idle timeout  STAT=0x%08X\n",
+                   (unsigned)REG_RD32(AES_STAT));
+            return DMAC_ERR_TIMEOUT;
+        }
+    }
+    return DMAC_OK;
+}
+
+/** Đợi DMA channel hoàn thành (poll RAW_TFR) */
+static dmac_err_t poll_tfr_done(uint32_t ch)
+{
+    uint32_t bit = 1U << ch;
+    uint32_t t   = TIMEOUT;
+    while (1) {
+        if (--t == 0) {
+            printf("  [ERR] ch%u poll_done timeout  RAW_TFR=0x%X RAW_ERR=0x%X ChEn=0x%X\n",
+                   (unsigned)ch,
+                   (unsigned)REG_RD32(DMAC_RAW_TFR),
+                   (unsigned)REG_RD32(DMAC_RAW_ERR),
+                   (unsigned)REG_RD32(DMAC_CH_EN));
+            return DMAC_ERR_TIMEOUT;
+        }
+        if (REG_RD32(DMAC_RAW_ERR) & bit) {
+            REG_WR32(DMAC_CLEAR_ERR, bit);
+            printf("  [ERR] ch%u HW error\n", (unsigned)ch);
+            return DMAC_ERR_HW;
+        }
+        if (REG_RD32(DMAC_RAW_TFR) & bit) {
+            REG_WR32(DMAC_CLEAR_TFR, bit);
+            return DMAC_OK;
+        }
+    }
+}
+
+/** Đợi SW-HS request bit được DMAC tự clear */
+static dmac_err_t sw_hs_wait_clr(volatile uint32_t *reg_addr, uint32_t ch)
+{
+    uint32_t t = TIMEOUT;
+    while ((*reg_addr) & SWHS_REQ_BIT(ch)) {
+        if (--t == 0) {
+            printf("  [ERR] SW-HS wait-clr timeout ch%u\n", (unsigned)ch);
+            return DMAC_ERR_TIMEOUT;
+        }
+    }
+    return DMAC_OK;
+}
+
+#define WAIT_CLR_SRC(ch)    sw_hs_wait_clr((volatile uint32_t *)(uintptr_t)DMAC_REQ_SRC,    ch)
+#define WAIT_CLR_DST(ch)    sw_hs_wait_clr((volatile uint32_t *)(uintptr_t)DMAC_REQ_DST,    ch)
+#define WAIT_CLR_SGLSRC(ch) sw_hs_wait_clr((volatile uint32_t *)(uintptr_t)DMAC_SGLREQ_SRC, ch)
+#define WAIT_CLR_SGLDST(ch) sw_hs_wait_clr((volatile uint32_t *)(uintptr_t)DMAC_SGLREQ_DST, ch)
+
+/* ===========================================================================
+ * SW-HS burst helpers
+ * =========================================================================*/
+
+/**
+ * @brief Gửi N single-word DST requests (mỗi lần 1 word, dùng SGLREQ_DST).
+ *        Dùng cho TX FIFO của AES khi MSIZE=1 hoặc muốn kiểm soát chặt.
+ */
+static dmac_err_t sw_hs_dst_single_n(uint32_t ch, uint32_t n_words)
+{
+    uint32_t i;
+    dmac_err_t r;
+    for (i = 0; i < n_words; i++) {
+        if (i == n_words - 1U) REG_WR32(DMAC_LST_DST, SWHS_SET(ch));
+        REG_WR32(DMAC_SGLREQ_DST, SWHS_SET(ch));
+        r = WAIT_CLR_SGLDST(ch);
+        if (r) return r;
+    }
+    return DMAC_OK;
+}
+
+/**
+ * @brief Gửi N single-word SRC requests (mỗi lần 1 word, dùng SGLREQ_SRC).
+ *        Dùng cho RX FIFO của AES khi đọc ciphertext ra.
+ */
+static dmac_err_t sw_hs_src_single_n(uint32_t ch, uint32_t n_words)
+{
+    uint32_t i;
+    dmac_err_t r;
+    for (i = 0; i < n_words; i++) {
+        if (i == n_words - 1U) REG_WR32(DMAC_LST_SRC, SWHS_SET(ch));
+        REG_WR32(DMAC_SGLREQ_SRC, SWHS_SET(ch));
+        r = WAIT_CLR_SGLSRC(ch);
+        if (r) return r;
+    }
+    return DMAC_OK;
+}
+
+/* ===========================================================================
+ * Register verify helper
+ * =========================================================================*/
+static dmac_err_t reg_verify32(uint32_t addr, uint32_t expected,
+                                uint32_t mask, const char *name)
+{
+    uint32_t got = REG_RD32(addr) & mask;
+    uint32_t exp = expected & mask;
+    if (got != exp) {
+        printf("  [REG-CHK FAIL] %s @ 0x%08X: wrote 0x%08X got 0x%08X\n",
+               name, (unsigned)addr, (unsigned)exp, (unsigned)got);
+        return DMAC_ERR_REG;
+    }
+    return DMAC_OK;
+}
+
+/* ===========================================================================
+ * Channel setup (giống test suite gốc)
+ * =========================================================================*/
+typedef struct {
+    uint32_t ch;
+    uint32_t sar;
+    uint32_t dar;
+    uint32_t llp;
+    uint32_t ctl_lo;
+    uint32_t ctl_hi;
+    uint32_t cfg_lo;
+    uint32_t cfg_hi;
+} ch_params_t;
+
+static dmac_err_t ch_setup(const ch_params_t *p)
+{
+    dmac_err_t r = DMAC_OK;
+    uint32_t ch = p->ch;
+
+    REG_WR32(DMAC_SAR(ch),    p->sar);
+    REG_WR32(DMAC_DAR(ch),    p->dar);
+    REG_WR32(DMAC_LLP(ch),    p->llp);
+
+    /* CFG phải ghi TRƯỚC CTL */
+    REG_WR32(DMAC_CFG_LO(ch), p->cfg_lo);
+    REG_WR32(DMAC_CFG_HI(ch), p->cfg_hi);
+
+    REG_WR32(DMAC_CTL_LO(ch), p->ctl_lo);
+    REG_WR32(DMAC_CTL_HI(ch), p->ctl_hi);
+
+    r |= reg_verify32(DMAC_SAR(ch),    p->sar,    0xFFFFFFFFU, "SAR");
+    r |= reg_verify32(DMAC_DAR(ch),    p->dar,    0xFFFFFFFFU, "DAR");
+    r |= reg_verify32(DMAC_CTL_LO(ch), p->ctl_lo, 0xFFFFFFFFU, "CTL_LO");
+    r |= reg_verify32(DMAC_CTL_HI(ch), p->ctl_hi, 0x00000FFFU, "CTL_HI");
+    r |= reg_verify32(DMAC_CFG_LO(ch), p->cfg_lo, 0xFFFFFFFFU, "CFG_LO");
+
+    if (r) printf("  [ERR] ch%u register write verify FAILED\n", (unsigned)ch);
+    return r;
+}
+
+static void ch_enable(uint32_t ch)
+{
+    REG_WR32(DMAC_CLEAR_TFR, CH_EN_BIT(ch));
+    REG_WR32(DMAC_CLEAR_ERR, CH_EN_BIT(ch));
+    REG_WR32(DMAC_CH_EN, CH_EN_SET(ch));
+    printf("  [CH%u] Enabled  ChEn=0x%04X\n",
+           (unsigned)ch, (unsigned)REG_RD32(DMAC_CH_EN));
+}
+
+/* ===========================================================================
+ * AES Initialization
+ * =========================================================================*/
+
+/**
+ * @brief Khởi tạo AES engine:
+ *   1. Disable AES trước khi cấu hình (ENAB.EN=0 mới ghi được reset/config)
+ *   2. Reset toàn bộ (core + TX FIFO + RX FIFO)
+ *   3. Load key
+ *   4. Ghi AES_CONF
+ *   5. Cấu hình AES_DMA (TXEN, RXEN, data level)
+ *   6. Enable AES (AES_ENAB.EN=1)
+ *
+ * @param key       Con trỏ mảng key (128-bit = 4 words, big-endian word order)
+ * @param conf_val  Giá trị AES_CONF đã lắp ráp đầy đủ
+ * @param txdl      TX FIFO data level (byte, 0–255)  – trigger DMA TX khi
+ *                  có ít nhất txdl slot trống trong TX FIFO
+ * @param rxdl      RX FIFO data level (byte, 0–255)  – trigger DMA RX khi
+ *                  có ít nhất rxdl word trong RX FIFO
+ */
+static dmac_err_t aes_init(const uint32_t *key,
+                            uint32_t conf_val,
+                            uint8_t  txdl,
+                            uint8_t  rxdl)
+{
+    uint32_t stat;
+    uint32_t t;
+
+    printf("  [AES] Init  BASE=0x%08X\n", (unsigned)AES_BASE);
+
+    /* --- Step 1: disable AES (ghi SCR chỉ có hiệu lực khi EN=0) --- */
+    REG_WR32(AES_ENAB, 0U);
+
+    /* --- Step 2: reset core + cả hai FIFO --- */
+    REG_WR32(AES_SWRS, AES_SWRS_SCR);   /* auto-clears theo spec */
+
+    /* Đợi reset xong: SWRS.SCR về 0 */
+    t = TIMEOUT;
+    while (REG_RD32(AES_SWRS) & AES_SWRS_SCR) {
+        if (--t == 0) { printf("  [ERR] AES reset timeout\n"); return DMAC_ERR_TIMEOUT; }
+    }
+
+    /* Xác nhận TX FIFO empty, RX FIFO empty sau reset */
+    stat = REG_RD32(AES_STAT);
+    printf("  [AES] Post-reset STAT=0x%08X  (expect TXEM=1 RXNE=0)\n", (unsigned)stat);
+    if (!(stat & AES_STAT_TXEM)) {
+        printf("  [WARN] TX FIFO not empty after reset\n");
+    }
+    if (stat & AES_STAT_RXNE) {
+        printf("  [WARN] RX FIFO not empty after reset\n");
+    }
+
+    /* --- Step 3: load 128-bit key vào K0LR..K1RR (4 word) ---
+     *  Mapping key[0..3] → K0LR, K0RR, K1LR, K1RR
+     *  (big-endian theo thứ tự tài liệu: K0LR = most-significant half-key)
+     */
+    REG_WR32(AES_K0LR, key[0]);
+    REG_WR32(AES_K0RR, key[1]);
+    REG_WR32(AES_K1LR, key[2]);
+    REG_WR32(AES_K1RR, key[3]);
+
+    printf("  [AES] Key loaded: %08X %08X %08X %08X\n",
+           (unsigned)key[0], (unsigned)key[1],
+           (unsigned)key[2], (unsigned)key[3]);
+
+    /* --- Step 4: cấu hình AES_CONF --- */
+    REG_WR32(AES_CONF, conf_val);
+    printf("  [AES] CONF=0x%08X\n", (unsigned)REG_RD32(AES_CONF));
+
+    /* --- Step 5: DMA data level, bật TXEN + RXEN ---
+     *  TXDL: khi TX FIFO còn >= txdl slot trống → DMA TX được kích
+     *  RXDL: khi RX FIFO có  >= rxdl word        → DMA RX được kích
+     */
+    {
+        uint32_t dma_val = AES_DMA_TXEN | AES_DMA_RXEN
+                         | ((uint32_t)rxdl << AES_DMA_RXDL_POS)
+                         | ((uint32_t)txdl << AES_DMA_TXDL_POS);
+        REG_WR32(AES_DMA, dma_val);
+        printf("  [AES] DMA=0x%08X\n", (unsigned)REG_RD32(AES_DMA));
+    }
+
+    /* --- Step 6: enable AES --- */
+    REG_WR32(AES_ENAB, AES_ENAB_EN);
+    printf("  [AES] ENAB=0x%08X\n", (unsigned)REG_RD32(AES_ENAB));
+
+    return DMAC_OK;
+}
+
+/* ===========================================================================
+ * TEST: AES DMA Single-Block ECB-128 Encrypt
+ *
+ * Channel allocation:
+ *   ch_tx = 6  (M2P: memory → AES TX FIFO)
+ *   ch_rx = 7  (P2M: AES RX FIFO → memory)
+ *
+ * Thứ tự thực hiện:
+ *   1. Khởi tạo AES (reset, key, conf, dma-level, enable)
+ *   2. Cấu hình và enable DMA TX channel (phase A)
+ *   3. Gửi SW-HS DST single requests để drive TX FIFO
+ *   4. Đợi DMA TX hoàn thành
+ *   5. Đợi AES engine xử lý xong (BUSY → 0)
+ *   6. Cấu hình và enable DMA RX channel (phase B)
+ *   7. Gửi SW-HS SRC single requests để drain RX FIFO
+ *   8. Đợi DMA RX hoàn thành
+ *   9. In kết quả
+ * =========================================================================*/
+dmac_err_t test_aes_dma_single_block(void)
+{
+    dmac_err_t r;
+    uint32_t i;
+
+    const uint32_t ch_tx = 6U;
+    const uint32_t ch_rx = 7U;
+
+    /* -----------------------------------------------------------------------
+     * Plaintext: 128-bit AES-ECB standard test vector
+     *   Plaintext : 00112233 44556677 8899AABB CCDDEEFF
+     *   Key-128   : 000102030405060708090A0B0C0D0E0F
+     *   Expected  : 69C4E0D8 6A7B0430 D8CDB780 70B4C55A
+     * --------------------------------------------------------------------- */
+    aes_plain[0] = 0x00112233U;
+    aes_plain[1] = 0x44556677U;
+    aes_plain[2] = 0x8899AABBU;
+    aes_plain[3] = 0xCCDDEEFFU;
+
+    /* AES-128 key (16 bytes = 4 words) */
+    static const uint32_t aes_key[4] = {
+        0x00010203U, 0x04050607U,
+        0x08090A0BU, 0x0C0D0E0FU
+    };
+
+    /* Expected ciphertext (NIST FIPS-197 example) */
+    static const uint32_t aes_expected[4] = {
+        0x69C4E0D8U, 0x6A7B0430U,
+        0xD8CDB780U, 0x70B4C55AU
+    };
+
+    for (i = 0; i < AES_WORDS; i++) aes_cipher[i] = 0U;
+
+    printf("\n=== TEST: AES DMA Single-Block ECB-128 Encrypt ===\n");
+    printf("  Plaintext : %08X %08X %08X %08X\n",
+           (unsigned)aes_plain[0], (unsigned)aes_plain[1],
+           (unsigned)aes_plain[2], (unsigned)aes_plain[3]);
+    printf("  Key       : %08X %08X %08X %08X\n",
+           (unsigned)aes_key[0], (unsigned)aes_key[1],
+           (unsigned)aes_key[2], (unsigned)aes_key[3]);
+
+    /* -----------------------------------------------------------------------
+     * Đảm bảo channel idle trước khi bắt đầu
+     * --------------------------------------------------------------------- */
+    {
+        uint32_t t = TIMEOUT;
+        while (REG_RD32(DMAC_CH_EN) & (CH_EN_BIT(ch_tx) | CH_EN_BIT(ch_rx))) {
+            if (--t == 0) {
+                printf("  [ERR] DMA channels not idle\n");
+                return DMAC_ERR_TIMEOUT;
+            }
+        }
+    }
+    REG_WR32(DMAC_CLEAR_TFR, CH_EN_BIT(ch_tx) | CH_EN_BIT(ch_rx));
+    REG_WR32(DMAC_CLEAR_ERR, CH_EN_BIT(ch_tx) | CH_EN_BIT(ch_rx));
+
+    /* -----------------------------------------------------------------------
+     * Step 1: Khởi tạo AES
+     *   conf: ECB, encrypt, 128-bit key, no byte-swap
+     *   txdl=4: DMA TX trigger khi TX FIFO có >=4 slot trống (full block)
+     *   rxdl=4: DMA RX trigger khi RX FIFO có >=4 word (full block sẵn)
+     * --------------------------------------------------------------------- */
+    {
+        uint32_t conf = AES_CONF_MODE_ECB
+                      | AES_CONF_DIR_ENC
+                      | AES_CONF_KEY128
+                      | AES_CONF_DTYPE_NONE;
+        r = aes_init(aes_key, conf, 4U, 4U);
+        if (r) return r;
+    }
+
+    /* -----------------------------------------------------------------------
+     * Phase A: M2P  –  plaintext buffer → AES TX FIFO
+     *
+     *   SAR  = aes_plain[]          (increments per word)
+     *   DAR  = AES_DATA             (fixed: FIFO, no increment)
+     *   TT_FC = M2P, SW-HS dst (HS_SEL_DST=1)
+     *   MSIZE=1 (một word/single request) cho đơn giản
+     *   Transfer size = AES_WORDS = 4
+     * --------------------------------------------------------------------- */
+    printf("\n  --- Phase A: DMA M2P  (plain → AES TX FIFO) ---\n");
+    {
+        ch_params_t pa = {
+            .ch     = ch_tx,
+            .sar    = (uint32_t)(uintptr_t)aes_plain,
+            .dar    = (uint32_t)AES_DATA,
+            .llp    = 0U,
+            /*
+             * SINC=INC  : source (memory) address increments
+             * DINC=NOCHANGE: destination (AES TX FIFO) address fixed
+             * TT_FC=M2P_DMA
+             * MSIZE=1   : đẩy từng word một khớp với SW single-request
+             */
+            .ctl_lo = ctl_lo_make(
+                1,                    /* INT_EN = 1 (set nhưng MASK đang đóng) */
+                TR_WIDTH_32, TR_WIDTH_32,
+                ADDR_NOCHANGE,        /* DINC: FIFO address không đổi          */
+                ADDR_INC,             /* SINC: bộ nhớ tăng dần                 */
+                MSIZE_1,              /* dst burst = 1 word/request             */
+                MSIZE_1,              /* src burst = 1 word/request             */
+                TT_FC_M2P_DMA,
+                MASTER_2,             /* AES trên MASTER_2 (AHB slave port 2)  */
+                MASTER_1,             /* RAM trên MASTER_1                      */
+                0, 0                  /* LLP_SRC_EN, LLP_DST_EN = 0 (no LLI)  */
+            ),
+            .ctl_hi = ctl_hi_make(AES_WORDS),
+            /*
+             * CFG_LO: priority=3 (cao nhất), sw_hs_dst=1 (SW kích TX),
+             *         sw_hs_src=0 (src là memory, không cần HS)
+             */
+            .cfg_lo = cfg_lo_make(3, /*sw_hs_dst=*/1, /*sw_hs_src=*/0,
+                                  /*reload_src=*/0, /*reload_dst=*/0),
+            /*
+             * CFG_HI: fifo_mode=1, dst_per=HWHS_AES_TX
+             *   (dst_per dùng khi HW-HS; với SW-HS nó bị ignore nhưng
+             *    ghi đúng để đề phòng HW interpret)
+             */
+            .cfg_hi = cfg_hi_make(1, /*src_per=*/0, /*dst_per=*/HWHS_AES_TX),
+        };
+
+        r = ch_setup(&pa);
+        if (r) return r;
+
+        ch_enable(ch_tx);
+
+        /*
+         * Gửi 4 SW single-request DST, mỗi request = 1 word vào TX FIFO.
+         * Trước khi gửi từng request, có thể poll TXNF=1 để chắc FIFO không full.
+         * Với AES block 4 word và FIFO thường >= 4 entry, poll không bắt buộc
+         * nhưng thêm vào để robust.
+         */
+        printf("  [TX] Sending %u SW-HS DST single requests...\n",
+               (unsigned)AES_WORDS);
+
+        for (i = 0; i < AES_WORDS; i++) {
+            /* Poll TX FIFO not full */
+            uint32_t t = TIMEOUT;
+            while (!(REG_RD32(AES_STAT) & AES_STAT_TXNF)) {
+                if (--t == 0) {
+                    printf("  [ERR] AES TX FIFO full timeout (word %u)\n",
+                           (unsigned)i);
+                    return DMAC_ERR_TIMEOUT;
+                }
+            }
+
+            int last = (i == AES_WORDS - 1U);
+            if (last) REG_WR32(DMAC_LST_DST, SWHS_SET(ch_tx));
+            REG_WR32(DMAC_SGLREQ_DST, SWHS_SET(ch_tx));
+            r = WAIT_CLR_SGLDST(ch_tx);
+            if (r) return r;
+
+            printf("  [TX] word %u pushed  STAT=0x%08X\n",
+                   (unsigned)i, (unsigned)REG_RD32(AES_STAT));
+        }
+
+        r = poll_tfr_done(ch_tx);
+        if (r) return r;
+        printf("  [TX] DMA phase A complete\n");
+    }
+
+    /* -----------------------------------------------------------------------
+     * Step 2: Đợi AES engine hoàn thành (BUSY → 0)
+     * --------------------------------------------------------------------- */
+    printf("\n  --- Waiting for AES engine ---\n");
+    r = aes_wait_idle();
+    if (r) return r;
+
+    {
+        uint32_t stat = REG_RD32(AES_STAT);
+        printf("  [AES] Done  STAT=0x%08X  RXNE=%u\n",
+               (unsigned)stat,
+               (unsigned)((stat & AES_STAT_RXNE) ? 1U : 0U));
+
+        if (!(stat & AES_STAT_RXNE)) {
+            printf("  [ERR] RX FIFO empty after AES done – no output data\n");
+            return DMAC_ERR_HW;
+        }
+
+        /* Xoá sticky error bits nếu có */
+        if (stat & (AES_STAT_RXUF | AES_STAT_TXOF)) {
+            printf("  [WARN] Sticky error bits set: STAT=0x%08X\n",
+                   (unsigned)stat);
+            /* clear bằng cách ghi 1 vào bit tương ứng (R/W1C) */
+            REG_WR32(AES_STAT, stat & (AES_STAT_RXUF | AES_STAT_TXOF));
+        }
+    }
+
+    /* -----------------------------------------------------------------------
+     * Phase B: P2M  –  AES RX FIFO → ciphertext buffer
+     *
+     *   SAR  = AES_DATA             (fixed: FIFO, no increment)
+     *   DAR  = aes_cipher[]         (increments per word)
+     *   TT_FC = P2M, SW-HS src (HS_SEL_SRC=1)
+     * --------------------------------------------------------------------- */
+    printf("\n  --- Phase B: DMA P2M  (AES RX FIFO → cipher) ---\n");
+    {
+        ch_params_t pb = {
+            .ch     = ch_rx,
+            .sar    = (uint32_t)AES_DATA,
+            .dar    = (uint32_t)(uintptr_t)aes_cipher,
+            .llp    = 0U,
+            /*
+             * SINC=NOCHANGE: source (AES RX FIFO) address fixed
+             * DINC=INC     : destination (memory) address increments
+             * TT_FC=P2M_DMA
+             * MSIZE=1
+             */
+            .ctl_lo = ctl_lo_make(
+                1,
+                TR_WIDTH_32, TR_WIDTH_32,
+                ADDR_INC,             /* DINC: bộ nhớ đích tăng dần            */
+                ADDR_NOCHANGE,        /* SINC: FIFO address không đổi          */
+                MSIZE_1,
+                MSIZE_1,
+                TT_FC_P2M_DMA,
+                MASTER_1,             /* RAM trên MASTER_1                      */
+                MASTER_2,             /* AES trên MASTER_2                      */
+                0, 0
+            ),
+            .ctl_hi = ctl_hi_make(AES_WORDS),
+            .cfg_lo = cfg_lo_make(3, /*sw_hs_dst=*/0, /*sw_hs_src=*/1,
+                                  /*reload_src=*/0, /*reload_dst=*/0),
+            .cfg_hi = cfg_hi_make(1, /*src_per=*/HWHS_AES_RX, /*dst_per=*/0),
+        };
+
+        r = ch_setup(&pb);
+        if (r) return r;
+
+        ch_enable(ch_rx);
+
+        printf("  [RX] Sending %u SW-HS SRC single requests...\n",
+               (unsigned)AES_WORDS);
+
+        for (i = 0; i < AES_WORDS; i++) {
+            /* Poll RX FIFO not empty */
+            uint32_t t = TIMEOUT;
+            while (!(REG_RD32(AES_STAT) & AES_STAT_RXNE)) {
+                if (--t == 0) {
+                    printf("  [ERR] AES RX FIFO empty timeout (word %u)\n",
+                           (unsigned)i);
+                    return DMAC_ERR_TIMEOUT;
+                }
+            }
+
+            int last = (i == AES_WORDS - 1U);
+            if (last) REG_WR32(DMAC_LST_SRC, SWHS_SET(ch_rx));
+            REG_WR32(DMAC_SGLREQ_SRC, SWHS_SET(ch_rx));
+            r = WAIT_CLR_SGLSRC(ch_rx);
+            if (r) return r;
+
+            printf("  [RX] word %u popped  STAT=0x%08X\n",
+                   (unsigned)i, (unsigned)REG_RD32(AES_STAT));
+        }
+
+        r = poll_tfr_done(ch_rx);
+        if (r) return r;
+        printf("  [RX] DMA phase B complete\n");
+    }
+
+    /* -----------------------------------------------------------------------
+     * Disable AES sau khi xong
+     * --------------------------------------------------------------------- */
+    REG_WR32(AES_ENAB, 0U);
+
+    /* -----------------------------------------------------------------------
+     * Verify kết quả
+     * --------------------------------------------------------------------- */
+    printf("\n  [AES] Plaintext  : %08X %08X %08X %08X\n",
+           (unsigned)aes_plain[0],    (unsigned)aes_plain[1],
+           (unsigned)aes_plain[2],    (unsigned)aes_plain[3]);
+    printf("  [AES] Ciphertext : %08X %08X %08X %08X\n",
+           (unsigned)aes_cipher[0],   (unsigned)aes_cipher[1],
+           (unsigned)aes_cipher[2],   (unsigned)aes_cipher[3]);
+    printf("  [AES] Expected   : %08X %08X %08X %08X\n",
+           (unsigned)aes_expected[0], (unsigned)aes_expected[1],
+           (unsigned)aes_expected[2], (unsigned)aes_expected[3]);
+
+    for (i = 0; i < AES_WORDS; i++) {
+        if (aes_cipher[i] != aes_expected[i]) {
+            printf("  [FAIL] cipher[%u] = 0x%08X, expected 0x%08X\n",
+                   (unsigned)i,
+                   (unsigned)aes_cipher[i],
+                   (unsigned)aes_expected[i]);
+            return DMAC_ERR_DATA;
+        }
+    }
+
+    printf("  [PASS] AES DMA single-block ECB-128: ciphertext matches expected\n");
+    return DMAC_OK;
+}
+
+/* ===========================================================================
+ * Entry point (standalone hoặc gọi từ test suite)
+ * =========================================================================*/
+#ifdef TEST_AES_STANDALONE
+int main(void)
+{
+    printf("============================================================\n");
+    printf("  AES DMA Single-Block Test\n");
+    printf("  DMAC=0x%08X  AES=0x%08X\n",
+           (unsigned)DMAC_BASE, (unsigned)AES_BASE);
+    printf("============================================================\n");
+
+    /* Bật DMAC (giả sử đã được init bên ngoài; nếu chạy standalone thì init ở đây) */
+    REG_WR32(DMAC_CFG_REG, 0U);
+    REG_WR32(DMAC_CH_EN,   0xFF00U);
+    REG_WR32(DMAC_CLEAR_TFR, 0xFFU);
+    REG_WR32(DMAC_CLEAR_ERR, 0xFFU);
+    REG_WR32(DMAC_MASK_TFR,  0xFF00U);
+    REG_WR32(DMAC_MASK_ERR,  0xFF00U);
+    REG_WR32(DMAC_CFG_REG, DMAC_EN);
+
+    dmac_err_t rc = test_aes_dma_single_block();
+
+    printf("\n[RESULT] AES DMA test --> %s\n",
+           (rc == DMAC_OK) ? "PASS" : "FAIL");
+    return (rc == DMAC_OK) ? 0 : 1;
+}
+#endif /* TEST_AES_STANDALONE */
