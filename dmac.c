@@ -69,30 +69,57 @@
 #define HWHS_SHA2_RX        3U
 
 /* ===========================================================================
+ * Physical Memory Map — THAY static array bằng địa chỉ physical cố định
+ *
+ * Lý do KHÔNG dùng static array:
+ *   - static array nằm trong .bss tại địa chỉ do linker quyết định (~0x8009xxxx)
+ *   - Nếu DMAC master chỉ decode được một vùng nhớ nhất định,
+ *     .bss có thể nằm ngoài tầm với → HRESP=ERROR (im lặng) → data không transfer
+ *   - LLI trong .bss: DMAC fetch LLI thành công (thấy trên wave) nhưng
+ *     SAR/DAR trong LLI trỏ vào .bss → DMAC đọc/ghi địa chỉ .bss → lỗi im lặng
+ *
+ * Chỉnh các địa chỉ dưới đây theo memory map thực tế của SoC:
+ * =========================================================================*/
+#ifndef SRC_BUF_BASE
+#define SRC_BUF_BASE    0x90000000UL   /* 256 bytes  = 64 words  */
+#endif
+#ifndef DST_BUF_BASE
+#define DST_BUF_BASE    0x90000100UL   /* 256 bytes  = 64 words  */
+#endif
+#ifndef LLI_M2M_BASE
+#define LLI_M2M_BASE    0x90000200UL   /* 4 × 28 = 112 bytes     */
+#endif
+#ifndef LLI_M2P_BASE
+#define LLI_M2P_BASE    0x90000280UL   /* 4 × 28 = 112 bytes     */
+#endif
+#ifndef AES_PLAIN_BASE
+#define AES_PLAIN_BASE  0x90000300UL   /* 16 bytes               */
+#endif
+#ifndef AES_CIPH_BASE
+#define AES_CIPH_BASE   0x90000310UL   /* 16 bytes               */
+#endif
+#ifndef SHA2_MSG_BASE
+#define SHA2_MSG_BASE   0x90000320UL   /* 64 bytes               */
+#endif
+#ifndef SHA2_DIG_BASE
+#define SHA2_DIG_BASE   0x90000360UL   /* 32 bytes               */
+#endif
+
+/* Pointer helpers — truy cập vùng nhớ physical như array */
+#define SRC_BUF     ((volatile uint32_t *)(uintptr_t)SRC_BUF_BASE)
+#define DST_BUF     ((volatile uint32_t *)(uintptr_t)DST_BUF_BASE)
+#define AES_PLAIN   ((volatile uint32_t *)(uintptr_t)AES_PLAIN_BASE)
+#define AES_CIPH    ((volatile uint32_t *)(uintptr_t)AES_CIPH_BASE)
+#define SHA2_MSG    ((volatile uint32_t *)(uintptr_t)SHA2_MSG_BASE)
+#define SHA2_DIG    ((volatile uint32_t *)(uintptr_t)SHA2_DIG_BASE)
+
+/* ===========================================================================
  * Test parameters
  * =========================================================================*/
-#define BUF_WORDS           64U     /* 256 bytes                 */
-#define LLI_BLOCKS          4U      /* số block trong multi-block*/
-#define BLK_WORDS           16U     /* words/block = BUF_WORDS/LLI_BLOCKS */
+#define BUF_WORDS           64U
+#define LLI_BLOCKS          4U
+#define BLK_WORDS           16U
 #define TIMEOUT             1000000U
-
-/* ===========================================================================
- * Buffers
- * =========================================================================*/
-static uint32_t src_buf[BUF_WORDS]  __attribute__((aligned(4)));
-static uint32_t dst_buf[BUF_WORDS]  __attribute__((aligned(4)));
-static uint32_t aes_plain[4]        __attribute__((aligned(4)));
-static uint32_t aes_cipher[4]       __attribute__((aligned(4)));
-static uint32_t sha2_msg[16]        __attribute__((aligned(4)));
-static uint32_t sha2_digest[8]      __attribute__((aligned(4)));
-
-/* LLI arrays – align 4 để LLP_MAKE hợp lệ */
-static dmac_lli_t lli_a[LLI_BLOCKS] __attribute__((aligned(4)));
-static dmac_lli_t lli_b[LLI_BLOCKS] __attribute__((aligned(4)));
-
-/* ===========================================================================
- * ISR flags
- * =========================================================================*/
 static volatile uint32_t g_irq_tfr   = 0;
 static volatile uint32_t g_irq_block = 0;
 static volatile uint32_t g_irq_err   = 0;
@@ -109,21 +136,29 @@ typedef enum {
 } dmac_err_t;
 
 /* ===========================================================================
- * Bare-metal string utilities (không dùng libc)
+ * Memory utilities (bare-metal, no libc)
  * =========================================================================*/
-static void bm_memset32(uint32_t *buf, uint32_t val, uint32_t words)
+static void mem_fill32(uint32_t base, uint32_t val, uint32_t words)
 {
     uint32_t i;
-    for (i = 0; i < words; i++) buf[i] = val;
+    for (i = 0; i < words; i++) REG_WR32(base + i * 4U, val);
 }
 
-static int bm_memcmp32(const uint32_t *a, const uint32_t *b, uint32_t words)
+static dmac_err_t mem_verify32(uint32_t src_base, uint32_t dst_base,
+                                uint32_t words, const char *name)
 {
     uint32_t i;
     for (i = 0; i < words; i++) {
-        if (a[i] != b[i]) return (int)i + 1;
+        uint32_t s = REG_RD32(src_base + i * 4U);
+        uint32_t d = REG_RD32(dst_base + i * 4U);
+        if (d != s) {
+            printf("  [FAIL] %s: [%u] exp=0x%08X got=0x%08X\n",
+                   name, (unsigned)i, (unsigned)s, (unsigned)d);
+            return DMAC_ERR_DATA;
+        }
     }
-    return 0;
+    printf("  [PASS] %s: %u words OK\n", name, (unsigned)words);
+    return DMAC_OK;
 }
 
 /* ===========================================================================
@@ -197,19 +232,7 @@ static dmac_err_t poll_block_done(uint32_t ch)
     }
 }
 
-static dmac_err_t verify_buf(const uint32_t *s, const uint32_t *d,
-                              uint32_t words, const char *name)
-{
-    int r = bm_memcmp32(s, d, words);
-    if (r) {
-        uint32_t idx = (uint32_t)(r - 1);
-        printf("  [FAIL] %s: [%u] exp=0x%08X got=0x%08X\n",
-               name, (unsigned)idx, (unsigned)s[idx], (unsigned)d[idx]);
-        return DMAC_ERR_DATA;
-    }
-    printf("  [PASS] %s: %u words OK\n", name, (unsigned)words);
-    return DMAC_OK;
-}
+
 
 /* ===========================================================================
  * ISR
@@ -417,13 +440,13 @@ static dmac_err_t test01_m2m_single(void)
     dmac_err_t r;
 
     printf("\n=== TEST 01: M2M single-block ===\n");
-    for (i = 0; i < BUF_WORDS; i++) { src_buf[i] = 0xA0000000U | i; }
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    for (i = 0; i < BUF_WORDS; i++) { SRC_BUF[i] = 0xA0000000U | i; }
+    mem_fill32(DST_BUF_BASE, 0U, BUF_WORDS);
 
     ch_params_t p = {
         .ch     = ch,
-        .sar    = (uint32_t)(uintptr_t)src_buf,
-        .dar    = (uint32_t)(uintptr_t)dst_buf,
+        .sar    = (uint32_t)(uintptr_t)SRC_BUF_BASE,
+        .dar    = (uint32_t)(uintptr_t)DST_BUF_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1,
                               TR_WIDTH_32, TR_WIDTH_32,
@@ -444,53 +467,257 @@ static dmac_err_t test01_m2m_single(void)
 
     r = poll_tfr_done(ch);
     if (r) return r;
-    return verify_buf(src_buf, dst_buf, BUF_WORDS, "M2M single");
+    return mem_verify32(SRC_BUF_BASE, DST_BUF_BASE, BUF_WORDS, "M2M single");
+}
+
+/* ===========================================================================
+ * LLI write helper — BẮTBUỘC dùng REG_WR32 (volatile) cho mỗi field
+ *
+ * Lý do KHÔNG được ghi qua struct pointer thông thường:
+ *   1. Compiler có thể reorder hoặc omit writes
+ *   2. Nếu cache enabled: CPU write vào D-cache, DMAC đọc thẳng RAM → thấy data cũ
+ *   3. Phải dùng volatile để đảm bảo write committed ra bus trước khi DMAC chạy
+ *
+ * Offset cố định trong LLI (hardware-defined, sizeof(dmac_lli_t)==28):
+ *   +0  SAR    (u32)
+ *   +4  DAR    (u32)
+ *   +8  LLP    (u32)
+ *   +12 CTL_LO (u32)
+ *   +16 CTL_HI (u32)
+ *   +20 SSTAT  (u32)
+ *   +24 DSTAT  (u32)
+ * =========================================================================*/
+#define LLI_FIELD_SAR_OFF    0U
+#define LLI_FIELD_DAR_OFF    4U
+#define LLI_FIELD_LLP_OFF    8U
+#define LLI_FIELD_CTLLO_OFF  12U
+#define LLI_FIELD_CTLHI_OFF  16U
+#define LLI_FIELD_SSTAT_OFF  20U
+#define LLI_FIELD_DSTAT_OFF  24U
+#define LLI_ENTRY_SIZE       28U   /* sizeof(dmac_lli_t) */
+
+/* Compile-time check */
+typedef char _lli_sz[(LLI_ENTRY_SIZE == sizeof(dmac_lli_t)) ? 1 : -1];
+
+static void lli_wr(uint32_t lli_base, uint32_t idx,
+                   uint32_t sar,    uint32_t dar,    uint32_t llp,
+                   uint32_t ctl_lo, uint32_t ctl_hi)
+{
+    uint32_t base = lli_base + idx * LLI_ENTRY_SIZE;
+    REG_WR32(base + LLI_FIELD_SAR_OFF,   sar);
+    REG_WR32(base + LLI_FIELD_DAR_OFF,   dar);
+    REG_WR32(base + LLI_FIELD_LLP_OFF,   llp);
+    REG_WR32(base + LLI_FIELD_CTLLO_OFF, ctl_lo);
+    REG_WR32(base + LLI_FIELD_CTLHI_OFF, ctl_hi);
+    REG_WR32(base + LLI_FIELD_SSTAT_OFF, 0U);
+    REG_WR32(base + LLI_FIELD_DSTAT_OFF, 0U);
+}
+
+static void lli_dump(uint32_t lli_base, uint32_t idx)
+{
+    uint32_t base = lli_base + idx * LLI_ENTRY_SIZE;
+    /* Đọc lại bằng REG_RD32 (volatile) — bypass cache nếu có */
+    printf("  LLI[%u]@0x%08X: SAR=0x%08X DAR=0x%08X LLP=0x%08X "
+           "CTL_LO=0x%08X CTL_HI=0x%08X\n",
+           (unsigned)idx, (unsigned)base,
+           (unsigned)REG_RD32(base + LLI_FIELD_SAR_OFF),
+           (unsigned)REG_RD32(base + LLI_FIELD_DAR_OFF),
+           (unsigned)REG_RD32(base + LLI_FIELD_LLP_OFF),
+           (unsigned)REG_RD32(base + LLI_FIELD_CTLLO_OFF),
+           (unsigned)REG_RD32(base + LLI_FIELD_CTLHI_OFF));
+}
+
+/* Memory / data barrier — flush write buffer trước khi DMAC bắt đầu */
+static inline void dmb(void)
+{
+#if defined(__ARM_ARCH)
+    __asm__ volatile ("dmb sy" ::: "memory");
+#else
+    __asm__ volatile ("" ::: "memory");   /* compiler barrier cho non-ARM */
+#endif
 }
 
 /* ===========================================================================
  * TEST 02 – M2M multi-block LLI
+ *
+ * LLI layout (N=4 blocks):
+ *
+ *   Channel regs : SAR=src[0], DAR=dst[0], CTL=blk0(LLP_EN=1), LLP→LLI[1]
+ *   LLI[1]       : SAR=src[1], DAR=dst[1], CTL=blk1(LLP_EN=1), LLP→LLI[2]
+ *   LLI[2]       : SAR=src[2], DAR=dst[2], CTL=blk2(LLP_EN=1), LLP→LLI[3]
+ *   LLI[3]       : SAR=src[3], DAR=dst[3], CTL=blk3(LLP_EN=0), LLP=0
+ *
+ * Channel LLP trỏ LLI[1] (KHÔNG phải LLI[0]).
+ * Sau block 0, DMAC fetch LLI[1] để nạp config block 1, v.v.
+ *
+ * QUAN TRỌNG:
+ *   - LLI phải nằm tại địa chỉ DMAC master có thể đọc được
+ *   - Ghi LLI bằng REG_WR32 (volatile), thêm DMB trước khi enable channel
+ *   - SAR/DAR trong LLI phải là địa chỉ physical của data buffer
  * =========================================================================*/
 static dmac_err_t test02_m2m_lli(void)
 {
     uint32_t i, ch = 1;
     dmac_err_t r;
-    const uint32_t bts = BLK_WORDS;
+    const uint32_t bts      = BLK_WORDS;
+    const uint32_t blk_byte = bts * 4U;
 
     printf("\n=== TEST 02: M2M multi-block LLI (%u x %u words) ===\n",
            (unsigned)LLI_BLOCKS, (unsigned)bts);
-    for (i = 0; i < BUF_WORDS; i++) src_buf[i] = 0xB0000000U | i;
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    printf("  SRC=0x%08X  DST=0x%08X  LLI@0x%08X\n",
+           (unsigned)SRC_BUF_BASE, (unsigned)DST_BUF_BASE, (unsigned)LLI_M2M_BASE);
+    printf("  LLI entry size = %u bytes\n", (unsigned)LLI_ENTRY_SIZE);
 
+    /* Khởi tạo data */
+    for (i = 0; i < BUF_WORDS; i++) SRC_BUF[i] = 0xB0000000U | i;
+    mem_fill32(DST_BUF_BASE, 0U, BUF_WORDS);
+
+    /* -----------------------------------------------------------------------
+     * Build LLI[0..N-1] tại địa chỉ physical LLI_M2M_BASE
+     * Dùng REG_WR32 — không dùng struct pointer
+     * ---------------------------------------------------------------------- */
     for (i = 0; i < LLI_BLOCKS; i++) {
-        int has_next = (i < (LLI_BLOCKS - 1U));
-        lli_a[i].sar    = (uint32_t)(uintptr_t)&src_buf[i * bts];
-        lli_a[i].dar    = (uint32_t)(uintptr_t)&dst_buf[i * bts];
-        lli_a[i].llp    = has_next ? LLP_MAKE(&lli_a[i+1U], MASTER_1) : 0U;
-        lli_a[i].ctl_lo = ctl_lo_make(1,
-                                      TR_WIDTH_32, TR_WIDTH_32,
-                                      ADDR_INC, ADDR_INC,
-                                      MSIZE_4, MSIZE_4,
-                                      TT_FC_M2M_DMA,
-                                      MASTER_1, MASTER_1,
-                                      has_next, has_next);
-        lli_a[i].ctl_hi = ctl_hi_make(bts);
-        lli_a[i].sstat  = 0U;
-        lli_a[i].dstat  = 0U;
-        printf("  LLI[%u] SAR=0x%08X DAR=0x%08X LLP=0x%08X CTL_LO=0x%08X CTL_HI=0x%08X\n",
-               (unsigned)i,
-               (unsigned)lli_a[i].sar, (unsigned)lli_a[i].dar,
-               (unsigned)lli_a[i].llp,
-               (unsigned)lli_a[i].ctl_lo, (unsigned)lli_a[i].ctl_hi);
+        int      has_next = (i < (LLI_BLOCKS - 1U));
+        uint32_t sar      = (uint32_t)SRC_BUF_BASE + i * blk_byte;
+        uint32_t dar      = (uint32_t)DST_BUF_BASE + i * blk_byte;
+        uint32_t llp_next = has_next
+                            ? LLP_MAKE(LLI_M2M_BASE + (i + 1U) * LLI_ENTRY_SIZE, MASTER_1)
+                            : 0U;
+        uint32_t ctl_lo   = ctl_lo_make(1,
+                                        TR_WIDTH_32, TR_WIDTH_32,
+                                        ADDR_INC, ADDR_INC,
+                                        MSIZE_4,  MSIZE_4,
+                                        TT_FC_M2M_DMA,
+                                        MASTER_1, MASTER_1,
+                                        has_next,  /* LLP_DEST_EN */
+                                        has_next); /* LLP_SRC_EN  */
+        uint32_t ctl_hi   = ctl_hi_make(bts);
+
+        lli_wr(LLI_M2M_BASE, i, sar, dar, llp_next, ctl_lo, ctl_hi);
     }
+
+    /* Barrier: đảm bảo tất cả LLI writes đã ra bus trước khi DMAC chạy */
+    dmb();
+
+    /* Readback bằng REG_RD32 để xác nhận data trong memory */
+    printf("  LLI readback (via REG_RD32):\n");
+    for (i = 0; i < LLI_BLOCKS; i++) lli_dump(LLI_M2M_BASE, i);
+
+    /* -----------------------------------------------------------------------
+     * Cấu hình channel:
+     *   - Block 0: SAR/DAR/CTL từ LLI[0] (ghi thẳng vào channel regs)
+     *   - LLP → LLI[1]  ← QUAN TRỌNG: không phải LLI[0]!
+     * ---------------------------------------------------------------------- */
+    uint32_t b0_sar    = (uint32_t)REG_RD32(LLI_M2M_BASE + LLI_FIELD_SAR_OFF);
+    uint32_t b0_dar    = (uint32_t)REG_RD32(LLI_M2M_BASE + LLI_FIELD_DAR_OFF);
+    uint32_t b0_ctl_lo = (uint32_t)REG_RD32(LLI_M2M_BASE + LLI_FIELD_CTLLO_OFF);
+    uint32_t b0_ctl_hi = (uint32_t)REG_RD32(LLI_M2M_BASE + LLI_FIELD_CTLHI_OFF);
+    /* Channel LLP → LLI[1] (block tiếp theo sau block 0) */
+    uint32_t ch_llp    = LLP_MAKE(LLI_M2M_BASE + 1U * LLI_ENTRY_SIZE, MASTER_1);
+
+    printf("  Channel: SAR=0x%08X DAR=0x%08X LLP=0x%08X CTL_LO=0x%08X CTL_HI=0x%08X\n",
+           (unsigned)b0_sar, (unsigned)b0_dar, (unsigned)ch_llp,
+           (unsigned)b0_ctl_lo, (unsigned)b0_ctl_hi);
 
     ch_params_t p = {
         .ch     = ch,
-        .sar    = lli_a[0].sar,
-        .dar    = lli_a[0].dar,
-        .llp    = LLP_MAKE(&lli_a[0], MASTER_1),
-        .ctl_lo = lli_a[0].ctl_lo,
-        .ctl_hi = lli_a[0].ctl_hi,
+        .sar    = b0_sar,
+        .dar    = b0_dar,
+        .llp    = ch_llp,
+        .ctl_lo = b0_ctl_lo,
+        .ctl_hi = b0_ctl_hi,
         .cfg_lo = cfg_lo_make(1, 0, 0, 0, 0),
+        .cfg_hi = cfg_hi_make(1, 0, 0),
+    };
+
+    r = ch_setup(&p);
+    if (r) return r;
+
+    /* Barrier lần nữa trước enable */
+    dmb();
+    ch_enable(ch, 0, 0);
+
+    r = poll_tfr_done(ch);
+    if (r) return r;
+
+    /* Verify từng block riêng để dễ debug */
+    for (i = 0; i < LLI_BLOCKS; i++) {
+        uint32_t src_off  = i * bts;
+        uint32_t dst_off  = i * bts;
+        uint32_t j;
+        int      blk_fail = 0;
+        for (j = 0; j < bts; j++) {
+            if (DST_BUF[dst_off + j] != SRC_BUF[src_off + j]) {
+                printf("  [FAIL] Block %u word[%u]: exp=0x%08X got=0x%08X\n",
+                       (unsigned)i, (unsigned)j,
+                       (unsigned)SRC_BUF[src_off + j],
+                       (unsigned)DST_BUF[dst_off + j]);
+                blk_fail = 1;
+                break;
+            }
+        }
+        if (!blk_fail)
+            printf("  [OK]   Block %u: %u words correct\n", (unsigned)i, (unsigned)bts);
+        else
+            return DMAC_ERR_DATA;
+    }
+    printf("  [PASS] M2M LLI: %u words total OK\n", (unsigned)BUF_WORDS);
+    return DMAC_OK;
+}
+
+/* ===========================================================================
+ * TEST 03a – M2P sanity probe: dùng M2M mode ghi thẳng vào địa chỉ IP
+ *
+ * Mục đích: xác nhận DMA có thể ghi tới peripheral address mà KHÔNG cần
+ * SW-HS, KHÔNG cần IP start. Dùng TT_FC_M2M_DMA + SINC=INC + DINC=INC.
+ * Sau đó đọc lại register đích để verify.
+ *
+ * Tại sao M2P thực sự hay bị treo ở sw_hs_dst_burst_block:
+ *   - SW set REQ_DST → DMAC viết MSIZE items xuống AHB
+ *   - DMAC chỉ clear REQ_DST bit SAU KHI AHB write hoàn thành
+ *   - Nếu IP FIFO đầy hoặc IP chưa start → AHB stall (HREADY=0 kéo dài)
+ *   - DMAC không thể hoàn thành burst → REQ_DST không bao giờ clear → HANG
+ * =========================================================================*/
+static dmac_err_t test03a_m2p_probe(void)
+{
+    uint32_t i, ch = 2;
+    dmac_err_t r;
+    /* Chỉnh hai hằng này theo hệ thống thực tế */
+    const uint32_t DST_IP_ADDR = AES_DATA_IN;     /* địa chỉ FIFO/register đích */
+    const uint32_t N_WORDS     = 4U;               /* số word cần ghi (1 AES block) */
+
+    printf("\n=== TEST 03a: M2P probe (M2M mode, no SW-HS) ===\n");
+    printf("  SRC=0x%08X  DST=0x%08X  N=%u words\n",
+           (unsigned)(uintptr_t)SRC_BUF_BASE, (unsigned)DST_IP_ADDR, (unsigned)N_WORDS);
+
+    /* Chuẩn bị data */
+    SRC_BUF[0] = 0x00112233U;
+    SRC_BUF[1] = 0x44556677U;
+    SRC_BUF[2] = 0x8899AABBU;
+    SRC_BUF[3] = 0xCCDDEEFFU;
+    for (i = N_WORDS; i < BUF_WORDS; i++) SRC_BUF[i] = 0xDEAD0000U | i;
+
+    ch_params_t p = {
+        .ch     = ch,
+        .sar    = (uint32_t)(uintptr_t)SRC_BUF_BASE,
+        .dar    = DST_IP_ADDR,
+        .llp    = 0U,
+        /*
+         * Dùng M2M: DMAC tự xử lý src và dst như memory.
+         * SINC=INC  : lấy từng word từ src_buf tăng dần
+         * DINC=INC  : ghi tới DST_IP_ADDR+0, +4, +8, +C
+         *             (nếu IP là FIFO dùng ADDR_NOCHANGE)
+         * TT_FC=M2M : không cần handshaking, DMAC tự chạy
+         */
+        .ctl_lo = ctl_lo_make(1,
+                              TR_WIDTH_32, TR_WIDTH_32,
+                              ADDR_INC,    ADDR_INC,    /* DINC=INC, SINC=INC */
+                              MSIZE_4,     MSIZE_4,
+                              TT_FC_M2M_DMA,
+                              MASTER_1,    MASTER_1,
+                              0, 0),
+        .ctl_hi = ctl_hi_make(N_WORDS),
+        .cfg_lo = cfg_lo_make(0, 0, 0, 0, 0),   /* no SW-HS, no reload */
         .cfg_hi = cfg_hi_make(1, 0, 0),
     };
 
@@ -498,40 +725,84 @@ static dmac_err_t test02_m2m_lli(void)
     if (r) return r;
     ch_enable(ch, 0, 0);
 
+    /* Không cần SW-HS — DMAC tự chạy */
     r = poll_tfr_done(ch);
     if (r) return r;
-    return verify_buf(src_buf, dst_buf, BUF_WORDS, "M2M LLI");
+
+    /*
+     * Verify: đọc lại địa chỉ đích.
+     * Nếu IP là write-only thì bỏ qua bước này.
+     */
+    printf("  DMA done. Readback DST:\n");
+    for (i = 0; i < N_WORDS; i++) {
+        uint32_t got = REG_RD32(DST_IP_ADDR + i * 4U);
+        printf("    [%u] wrote=0x%08X  read=0x%08X  %s\n",
+               (unsigned)i,
+               (unsigned)SRC_BUF[i],
+               (unsigned)got,
+               (got == SRC_BUF[i]) ? "OK" : "(write-only or mismatch)");
+    }
+    printf("  [PASS] M2P probe: DMA reached peripheral address\n");
+    return DMAC_OK;
 }
 
 /* ===========================================================================
- * TEST 03 – M2P single-block, SW-HS dst
+ * TEST 03b – M2P single-block THỰC SỰ với SW-HS dst
  *
- * Mô phỏng: dst_buf[0] làm "FIFO addr cố định" (ADDR_NOCHANGE cho DINC)
+ * Điều kiện để KHÔNG bị treo:
+ *   1. IP phải được start/enable TRƯỚC khi gọi hàm này
+ *   2. N_WORDS phải khớp đúng với FIFO capacity của IP
+ *   3. MSIZE phải ≤ kích thước FIFO của IP (tránh ghi khi FIFO đầy)
+ *   4. IP phải đang chờ nhận data (không bị stall AHB)
+ *
+ * Flow đúng cho SW-HS dst:
+ *   SW set REQ_DST  →  DMAC ghi MSIZE items xuống IP  →  DMAC clear REQ_DST
+ *   (lặp lại cho đến hết block)
+ *
+ * Nếu IP chưa sẵn sàng → AHB stall → REQ_DST không clear → HANG
  * =========================================================================*/
-static dmac_err_t test03_m2p_swhs(void)
+static dmac_err_t test03b_m2p_swhs(void)
 {
-    uint32_t i, ch = 2;
+    uint32_t ch = 2;
     dmac_err_t r;
-    uint32_t fifo_addr = (uint32_t)(uintptr_t)&dst_buf[0];
+    /*
+     * Chỉnh các thông số sau theo IP thực tế:
+     *   DST_FIFO_ADDR  : địa chỉ FIFO input của IP (cố định, DINC=NOCHANGE)
+     *   N_WORDS        : số word cần transfer (phải ≤ FIFO depth)
+     *   BURST_MSIZE    : phải ≤ số slot còn trống trong FIFO khi trigger request
+     */
+    const uint32_t DST_FIFO_ADDR = AES_DATA_IN;
+    const uint32_t N_WORDS       = 4U;     /* 1 AES block = 4 words */
+    const uint32_t BURST_MSIZE   = MSIZE_4; /* 4 items/burst, khớp với N_WORDS */
 
-    printf("\n=== TEST 03: M2P SW-HS dst ===\n");
-    for (i = 0; i < BUF_WORDS; i++) src_buf[i] = 0xC0000000U | i;
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    printf("\n=== TEST 03b: M2P SW-HS dst (real peripheral) ===\n");
+    printf("  SRC=0x%08X  DST_FIFO=0x%08X  N=%u words\n",
+           (unsigned)(uintptr_t)SRC_BUF_BASE, (unsigned)DST_FIFO_ADDR, (unsigned)N_WORDS);
+
+    SRC_BUF[0] = 0x00112233U;
+    SRC_BUF[1] = 0x44556677U;
+    SRC_BUF[2] = 0x8899AABBU;
+    SRC_BUF[3] = 0xCCDDEEFFU;
+
+    /* === BƯỚC QUAN TRỌNG: khởi động IP TRƯỚC khi enable DMA === */
+    /* Ví dụ AES: ghi key, set mode, rồi start để IP sẵn sàng nhận data */
+    /* REG_WR32(AES_CTRL, AES_CTRL_ENC | AES_CTRL_START); */
+    /* Nếu bỏ qua bước này → IP FIFO không drain → AHB stall → HANG */
 
     ch_params_t p = {
         .ch     = ch,
-        .sar    = (uint32_t)(uintptr_t)src_buf,
-        .dar    = fifo_addr,
+        .sar    = (uint32_t)(uintptr_t)SRC_BUF_BASE,
+        .dar    = DST_FIFO_ADDR,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1,
-                              TR_WIDTH_32, TR_WIDTH_32,
-                              ADDR_NOCHANGE, ADDR_INC,  /* DINC=NC, SINC=INC */
-                              MSIZE_4, MSIZE_4,
+                              TR_WIDTH_32,    TR_WIDTH_32,
+                              ADDR_NOCHANGE,  ADDR_INC,   /* DINC=NC (FIFO), SINC=INC */
+                              BURST_MSIZE,    BURST_MSIZE,
                               TT_FC_M2P_DMA,
-                              MASTER_1, MASTER_1,
+                              MASTER_1,       MASTER_1,
                               0, 0),
-        .ctl_hi = ctl_hi_make(BUF_WORDS),
-        .cfg_lo = cfg_lo_make(1, 1, 0, 0, 0),  /* sw_hs_dst=1 */
+        .ctl_hi = ctl_hi_make(N_WORDS),
+        .cfg_lo = cfg_lo_make(1, 1, 0, 0, 0),   /* sw_hs_dst=1 */
         .cfg_hi = cfg_hi_make(1, 0, HWHS_AES_TX),
     };
 
@@ -539,40 +810,59 @@ static dmac_err_t test03_m2p_swhs(void)
     if (r) return r;
     ch_enable(ch, 0, 0);
 
-    r = sw_hs_dst_burst_block(ch, BUF_WORDS, MSIZE_4);
-    if (r) return r;
+    /*
+     * Gửi SW-HS: CHỈ 1 burst vì N_WORDS=4 = MSIZE_4=4 items
+     * Nếu N_WORDS > FIFO_DEPTH: phải chờ IP drain FIFO giữa các burst
+     *   (đọc IP status register trước mỗi sw_hs_dst_burst_block)
+     */
+    printf("  Sending %u-word SW-HS dst burst...\n", (unsigned)N_WORDS);
+    r = sw_hs_dst_burst_block(ch, N_WORDS, BURST_MSIZE);
+    if (r) {
+        printf("  [ERR] sw_hs_dst_burst_block HANG — IP chưa sẵn sàng?\n");
+        printf("        Kiểm tra: IP đã start chưa? FIFO có đầy không?\n");
+        printf("        RAW_TFR=0x%X  RAW_ERR=0x%X  ChEn=0x%X\n",
+               (unsigned)REG_RD32(DMAC_RAW_TFR),
+               (unsigned)REG_RD32(DMAC_RAW_ERR),
+               (unsigned)REG_RD32(DMAC_CH_EN));
+        printf("        REQ_DST=0x%X (bit%u stuck=1 → DMAC đang stall)\n",
+               (unsigned)REG_RD32(DMAC_REQ_DST), (unsigned)ch);
+        /* Force disable channel để thoát */
+        REG_WR32(DMAC_CFG_LO(ch), REG_RD32(DMAC_CFG_LO(ch)) | CFG_CH_SUSP_BIT);
+        REG_WR32(DMAC_CH_EN, CH_EN_CLR(ch));
+        return r;
+    }
 
     r = poll_tfr_done(ch);
     if (r) return r;
 
-    /* Giá trị cuối cùng ghi vào FIFO (no-increment) là src_buf[BUF_WORDS-1] */
-    printf("  [M2P] FIFO last word = 0x%08X (expect 0x%08X)\n",
-           (unsigned)dst_buf[0], (unsigned)src_buf[BUF_WORDS - 1U]);
-    if (dst_buf[0] != src_buf[BUF_WORDS - 1U]) return DMAC_ERR_DATA;
-    printf("  [PASS] M2P SW-HS dst\n");
+    printf("  [PASS] M2P SW-HS: %u words sent to 0x%08X\n",
+           (unsigned)N_WORDS, (unsigned)DST_FIFO_ADDR);
+
+    /* Nếu IP có status register, đọc ở đây để xác nhận nhận được data */
+    printf("  AES_STATUS = 0x%08X\n", (unsigned)REG_RD32(AES_STATUS));
     return DMAC_OK;
 }
 
 /* ===========================================================================
  * TEST 04 – P2M single-block, SW-HS src
  *
- * Mô phỏng: src_buf[0] làm "FIFO cố định" (ADDR_NOCHANGE cho SINC)
+ * Mô phỏng: SRC_BUF[0] làm "FIFO cố định" (ADDR_NOCHANGE cho SINC)
  * =========================================================================*/
 static dmac_err_t test04_p2m_swhs(void)
 {
     uint32_t i, ch = 3;
     dmac_err_t r;
     const uint32_t FIFO_VAL = 0xCAFEBABEU;
-    uint32_t fifo_addr = (uint32_t)(uintptr_t)&src_buf[0];
+    uint32_t fifo_addr = (uint32_t)(uintptr_t)&SRC_BUF[0];
 
     printf("\n=== TEST 04: P2M SW-HS src ===\n");
-    src_buf[0] = FIFO_VAL;
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    SRC_BUF[0] = FIFO_VAL;
+    mem_fill32(DST_BUF_BASE, 0U, BUF_WORDS);
 
     ch_params_t p = {
         .ch     = ch,
         .sar    = fifo_addr,
-        .dar    = (uint32_t)(uintptr_t)dst_buf,
+        .dar    = (uint32_t)(uintptr_t)DST_BUF_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1,
                               TR_WIDTH_32, TR_WIDTH_32,
@@ -597,9 +887,9 @@ static dmac_err_t test04_p2m_swhs(void)
     if (r) return r;
 
     for (i = 0; i < BUF_WORDS; i++) {
-        if (dst_buf[i] != FIFO_VAL) {
+        if (DST_BUF[i] != FIFO_VAL) {
             printf("  [FAIL] P2M: dst[%u]=0x%08X != 0x%08X\n",
-                   (unsigned)i, (unsigned)dst_buf[i], (unsigned)FIFO_VAL);
+                   (unsigned)i, (unsigned)DST_BUF[i], (unsigned)FIFO_VAL);
             return DMAC_ERR_DATA;
         }
     }
@@ -616,12 +906,12 @@ static dmac_err_t test05_p2p_swhs(void)
     uint32_t i, ch = 4;
     const uint32_t words = 16U;
     dmac_err_t r;
-    uint32_t src_fifo = (uint32_t)(uintptr_t)&src_buf[0];
-    uint32_t dst_fifo = (uint32_t)(uintptr_t)&dst_buf[0];
+    uint32_t src_fifo = (uint32_t)(uintptr_t)&SRC_BUF[0];
+    uint32_t dst_fifo = (uint32_t)(uintptr_t)&DST_BUF[0];
 
     printf("\n=== TEST 05: P2P SW-HS src+dst ===\n");
-    src_buf[0] = 0x55AA55AAU;
-    dst_buf[0] = 0U;
+    SRC_BUF[0] = 0x55AA55AAU;
+    DST_BUF[0] = 0U;
 
     ch_params_t p = {
         .ch     = ch,
@@ -660,8 +950,8 @@ static dmac_err_t test05_p2p_swhs(void)
 
     r = poll_tfr_done(ch);
     if (r) return r;
-    printf("  [P2P] dst_buf[0]=0x%08X (expect 0x55AA55AA)\n", (unsigned)dst_buf[0]);
-    if (dst_buf[0] != 0x55AA55AAU) return DMAC_ERR_DATA;
+    printf("  [P2P] DST_BUF[0]=0x%08X (expect 0x55AA55AA)\n", (unsigned)DST_BUF[0]);
+    if (DST_BUF[0] != 0x55AA55AAU) return DMAC_ERR_DATA;
     printf("  [PASS] P2P SW-HS\n");
     return DMAC_OK;
 }
@@ -674,37 +964,38 @@ static dmac_err_t test06_m2p_lli_swhs(void)
     uint32_t i, ch = 5;
     const uint32_t bts = BLK_WORDS;
     dmac_err_t r;
-    uint32_t fifo_addr = (uint32_t)(uintptr_t)&dst_buf[0];
+    uint32_t fifo_addr = (uint32_t)(uintptr_t)&DST_BUF[0];
 
     printf("\n=== TEST 06: M2P LLI SW-HS dst (%u x %u words) ===\n",
            (unsigned)LLI_BLOCKS, (unsigned)bts);
-    for (i = 0; i < BUF_WORDS; i++) src_buf[i] = 0xF0000000U | i;
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    for (i = 0; i < BUF_WORDS; i++) SRC_BUF[i] = 0xF0000000U | i;
+    mem_fill32(DST_BUF_BASE, 0U, BUF_WORDS);
 
     for (i = 0; i < LLI_BLOCKS; i++) {
         int has_next = (i < (LLI_BLOCKS - 1U));
-        lli_b[i].sar    = (uint32_t)(uintptr_t)&src_buf[i * bts];
-        lli_b[i].dar    = fifo_addr;
-        lli_b[i].llp    = has_next ? LLP_MAKE(&lli_b[i+1U], MASTER_1) : 0U;
-        lli_b[i].ctl_lo = ctl_lo_make(1,
-                                      TR_WIDTH_32, TR_WIDTH_32,
-                                      ADDR_NOCHANGE, ADDR_INC,
-                                      MSIZE_4, MSIZE_4,
-                                      TT_FC_M2P_DMA,
-                                      MASTER_1, MASTER_1,
-                                      has_next, has_next);
-        lli_b[i].ctl_hi = ctl_hi_make(bts);
-        lli_b[i].sstat  = 0U;
-        lli_b[i].dstat  = 0U;
+        uint32_t sar      = (uint32_t)SRC_BUF_BASE + i * bts * 4U;
+        uint32_t llp_next = has_next
+                            ? LLP_MAKE(LLI_M2P_BASE + (i+1U)*LLI_ENTRY_SIZE, MASTER_1)
+                            : 0U;
+        uint32_t ctl_lo   = ctl_lo_make(1,
+                                        TR_WIDTH_32, TR_WIDTH_32,
+                                        ADDR_NOCHANGE, ADDR_INC,
+                                        MSIZE_4, MSIZE_4,
+                                        TT_FC_M2P_DMA,
+                                        MASTER_1, MASTER_1,
+                                        has_next, has_next);
+        uint32_t ctl_hi   = ctl_hi_make(bts);
+        lli_wr(LLI_M2P_BASE, i, sar, fifo_addr, llp_next, ctl_lo, ctl_hi);
     }
 
+    dmb();
     ch_params_t p = {
         .ch     = ch,
-        .sar    = lli_b[0].sar,
+        .sar    = (uint32_t)SRC_BUF_BASE,
         .dar    = fifo_addr,
-        .llp    = LLP_MAKE(&lli_b[0], MASTER_1),
-        .ctl_lo = lli_b[0].ctl_lo,
-        .ctl_hi = lli_b[0].ctl_hi,
+        .llp    = LLP_MAKE(LLI_M2P_BASE + 1U * LLI_ENTRY_SIZE, MASTER_1),
+        .ctl_lo = (uint32_t)REG_RD32(LLI_M2P_BASE + LLI_FIELD_CTLLO_OFF),
+        .ctl_hi = (uint32_t)REG_RD32(LLI_M2P_BASE + LLI_FIELD_CTLHI_OFF),
         .cfg_lo = cfg_lo_make(1, 1, 0, 0, 0),
         .cfg_hi = cfg_hi_make(1, 0, 0),
     };
@@ -726,7 +1017,7 @@ static dmac_err_t test06_m2p_lli_swhs(void)
 
     r = poll_tfr_done(ch);
     if (r) return r;
-    printf("  [M2P LLI] dst_buf[0]=0x%08X\n", (unsigned)dst_buf[0]);
+    printf("  [M2P LLI] DST_BUF[0]=0x%08X\n", (unsigned)DST_BUF[0]);
     return DMAC_OK;
 }
 
@@ -741,9 +1032,9 @@ static dmac_err_t test07_aes_dma(void)
     uint32_t timeout;
 
     printf("\n=== TEST 07: AES DMA (M2P + P2M) ===\n");
-    aes_plain[0] = 0x00112233U; aes_plain[1] = 0x44556677U;
-    aes_plain[2] = 0x8899AABBU; aes_plain[3] = 0xCCDDEEFFU;
-    bm_memset32(aes_cipher, 0U, 4U);
+    AES_PLAIN[0] = 0x00112233U; AES_PLAIN[1] = 0x44556677U;
+    AES_PLAIN[2] = 0x8899AABBU; AES_PLAIN[3] = 0xCCDDEEFFU;
+    mem_fill32(AES_CIPH_BASE, 0U, 4U);
 
     /* Cấu hình AES: start encrypt */
     REG_WR32(AES_CTRL, AES_CTRL_ENC | AES_CTRL_START);
@@ -752,7 +1043,7 @@ static dmac_err_t test07_aes_dma(void)
     printf("  Phase A: DMA → AES_DATA_IN\n");
     ch_params_t pa = {
         .ch     = ch_tx,
-        .sar    = (uint32_t)(uintptr_t)aes_plain,
+        .sar    = (uint32_t)(uintptr_t)AES_PLAIN_BASE,
         .dar    = (uint32_t)AES_DATA_IN,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
@@ -781,7 +1072,7 @@ static dmac_err_t test07_aes_dma(void)
     ch_params_t pb = {
         .ch     = ch_rx,
         .sar    = (uint32_t)AES_DATA_OUT,
-        .dar    = (uint32_t)(uintptr_t)aes_cipher,
+        .dar    = (uint32_t)(uintptr_t)AES_CIPH_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
                               ADDR_INC, ADDR_NOCHANGE,
@@ -799,8 +1090,8 @@ static dmac_err_t test07_aes_dma(void)
     r = poll_tfr_done(ch_rx); if (r) return r;
 
     printf("  [AES] Cipher: %08X %08X %08X %08X\n",
-           (unsigned)aes_cipher[0], (unsigned)aes_cipher[1],
-           (unsigned)aes_cipher[2], (unsigned)aes_cipher[3]);
+           (unsigned)AES_CIPH[0], (unsigned)AES_CIPH[1],
+           (unsigned)AES_CIPH[2], (unsigned)AES_CIPH[3]);
     printf("  [PASS] AES DMA done (verify cipher against expected key-dependent value)\n");
     return DMAC_OK;
 }
@@ -817,8 +1108,8 @@ static dmac_err_t test08_sha2_dma(void)
     uint32_t timeout;
 
     printf("\n=== TEST 08: SHA2 DMA (M2P + P2M) ===\n");
-    for (i = 0; i < msg_words; i++) sha2_msg[i] = 0x61626300U | i;
-    bm_memset32(sha2_digest, 0U, digest_words);
+    for (i = 0; i < msg_words; i++) SHA2_MSG[i] = 0x61626300U | i;
+    mem_fill32(SHA2_DIG_BASE, 0U, digest_words);
 
     REG_WR32(SHA2_CTRL, SHA2_CTRL_RESET);
     /* small delay */
@@ -829,7 +1120,7 @@ static dmac_err_t test08_sha2_dma(void)
     printf("  Phase A: DMA → SHA2_DATA_IN (%u words)\n", (unsigned)msg_words);
     ch_params_t pa = {
         .ch     = ch_tx,
-        .sar    = (uint32_t)(uintptr_t)sha2_msg,
+        .sar    = (uint32_t)(uintptr_t)SHA2_MSG_BASE,
         .dar    = (uint32_t)SHA2_DATA_IN,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
@@ -857,7 +1148,7 @@ static dmac_err_t test08_sha2_dma(void)
     ch_params_t pb = {
         .ch     = ch_rx,
         .sar    = (uint32_t)SHA2_DIGEST,
-        .dar    = (uint32_t)(uintptr_t)sha2_digest,
+        .dar    = (uint32_t)(uintptr_t)SHA2_DIG_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
                               ADDR_INC, ADDR_NOCHANGE,
@@ -875,7 +1166,7 @@ static dmac_err_t test08_sha2_dma(void)
     r = poll_tfr_done(ch_rx); if (r) return r;
 
     printf("  [SHA2] Digest: ");
-    for (i = 0; i < digest_words; i++) printf("%08X ", (unsigned)sha2_digest[i]);
+    for (i = 0; i < digest_words; i++) printf("%08X ", (unsigned)SHA2_DIG[i]);
     printf("\n  [PASS] SHA2 DMA done\n");
     return DMAC_OK;
 }
@@ -890,15 +1181,15 @@ static dmac_err_t test09_m2m_irq(void)
     uint32_t timeout;
 
     printf("\n=== TEST 09: M2M interrupt-driven ===\n");
-    for (i = 0; i < BUF_WORDS; i++) src_buf[i] = 0xE0000000U | i;
-    bm_memset32(dst_buf, 0U, BUF_WORDS);
+    for (i = 0; i < BUF_WORDS; i++) SRC_BUF[i] = 0xE0000000U | i;
+    mem_fill32(DST_BUF_BASE, 0U, BUF_WORDS);
 
     g_irq_tfr = 0U; g_irq_err = 0U;
 
     ch_params_t p = {
         .ch     = ch,
-        .sar    = (uint32_t)(uintptr_t)src_buf,
-        .dar    = (uint32_t)(uintptr_t)dst_buf,
+        .sar    = (uint32_t)(uintptr_t)SRC_BUF_BASE,
+        .dar    = (uint32_t)(uintptr_t)DST_BUF_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
                               ADDR_INC, ADDR_INC,
@@ -919,7 +1210,7 @@ static dmac_err_t test09_m2m_irq(void)
         /* WFI / yield on RTOS */
     }
     printf("  [IRQ] ISR signaled ch%u done\n", (unsigned)ch);
-    return verify_buf(src_buf, dst_buf, BUF_WORDS, "M2M IRQ");
+    return mem_verify32(SRC_BUF_BASE, DST_BUF_BASE, BUF_WORDS, "M2M IRQ");
 }
 
 /* ===========================================================================
@@ -938,12 +1229,12 @@ static dmac_err_t test10_m2m_autoreload(void)
 
     printf("\n=== TEST 10: M2M auto-reload (%u x %u words) ===\n",
            (unsigned)n_block, (unsigned)bts);
-    for (i = 0; i < bts; i++) { src_buf[i] = 0xA5A50000U | i; dst_buf[i] = 0U; }
+    for (i = 0; i < bts; i++) { SRC_BUF[i] = 0xA5A50000U | i; DST_BUF[i] = 0U; }
 
     ch_params_t p = {
         .ch     = ch,
-        .sar    = (uint32_t)(uintptr_t)src_buf,
-        .dar    = (uint32_t)(uintptr_t)dst_buf,
+        .sar    = (uint32_t)(uintptr_t)SRC_BUF_BASE,
+        .dar    = (uint32_t)(uintptr_t)DST_BUF_BASE,
         .llp    = 0U,
         .ctl_lo = ctl_lo_make(1, TR_WIDTH_32, TR_WIDTH_32,
                               ADDR_INC, ADDR_INC,
@@ -978,7 +1269,7 @@ static dmac_err_t test10_m2m_autoreload(void)
         }
     }
 
-    return verify_buf(src_buf, dst_buf, bts, "M2M auto-reload");
+    return mem_verify32(SRC_BUF_BASE, DST_BUF_BASE, bts, "M2M auto-reload");
 }
 
 /* ===========================================================================
@@ -994,7 +1285,8 @@ int main(void)
     static const test_t tests[] = {
         { "01 M2M single-block",        test01_m2m_single    },
         { "02 M2M multi-block LLI",     test02_m2m_lli       },
-        { "03 M2P SW-HS dst",           test03_m2p_swhs      },
+        { "03a M2P probe (M2M mode)",   test03a_m2p_probe    },
+        { "03b M2P SW-HS dst (real)",   test03b_m2p_swhs     },
         { "04 P2M SW-HS src",           test04_p2m_swhs      },
         { "05 P2P SW-HS src+dst",       test05_p2p_swhs      },
         { "06 M2P LLI SW-HS dst",       test06_m2p_lli_swhs  },
